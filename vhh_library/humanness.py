@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
-from vhh_library.sequence import IMGT_REGIONS, VHHSequence
+from vhh_library.sequence import VHHSequence
 
 _FR_KEYS = ("fr1", "fr2", "fr3", "fr4")
 

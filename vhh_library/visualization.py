@@ -32,7 +32,7 @@ class SequenceVisualizer:
             subseq = "".join(
                 vhh.imgt_numbered.get(pos, "") for pos in range(start, end + 1)
             )
-            width = len(subseq)
+            len(subseq)
             blocks.append(
                 f'<span style="display:inline-block;background:{bg};'
                 f"padding:2px 4px;margin:1px;border-radius:3px;"

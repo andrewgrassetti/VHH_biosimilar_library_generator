@@ -5,9 +5,12 @@ from __future__ import annotations
 import pytest
 
 from vhh_library.sequence import VHHSequence
-from vhh_library.stability import StabilityScorer, _nanomelt_available, _esm2_pll_available
+from vhh_library.stability import StabilityScorer, _esm2_pll_available, _nanomelt_available
 
-SAMPLE_VHH = "QVQLVESGGGLVQAGGSLRLSCAASGRTFSSYAMGWFRQAPGKEREFVAAISWSGGSTYYADSVKGRFTISRDNAKNTVYLQMNSLKPEDTAVYYCAAAGVRAEWDYWGQGTLVTVSS"
+SAMPLE_VHH = (
+    "QVQLVESGGGLVQAGGSLRLSCAASGRTFSSYAMGWFRQAPGKEREFVAAISW"
+    "SGGSTYYADSVKGRFTISRDNAKNTVYLQMNSLKPEDTAVYYCAAAGVRAEWDYWGQGTLVTVSS"
+)
 
 
 @pytest.fixture

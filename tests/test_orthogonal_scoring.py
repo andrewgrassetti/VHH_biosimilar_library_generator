@@ -11,7 +11,10 @@ from vhh_library.orthogonal_scoring import (
 )
 from vhh_library.sequence import VHHSequence
 
-SAMPLE_VHH = "QVQLVESGGGLVQAGGSLRLSCAASGRTFSSYAMGWFRQAPGKEREFVAAISWSGGSTYYADSVKGRFTISRDNAKNTVYLQMNSLKPEDTAVYYCAAAGVRAEWDYWGQGTLVTVSS"
+SAMPLE_VHH = (
+    "QVQLVESGGGLVQAGGSLRLSCAASGRTFSSYAMGWFRQAPGKEREFVAAISW"
+    "SGGSTYYADSVKGRFTISRDNAKNTVYLQMNSLKPEDTAVYYCAAAGVRAEWDYWGQGTLVTVSS"
+)
 
 
 @pytest.fixture
@@ -107,9 +110,9 @@ class TestIntegration:
         vhh: VHHSequence,
     ) -> None:
         mutant = VHHSequence.mutate(vhh, 1, "A")
-        hsc_original = hsc.score(vhh)["composite_score"]
+        hsc.score(vhh)["composite_score"]
         hsc_mutant = hsc.score(mutant)["composite_score"]
-        con_original = consensus.score(vhh)["composite_score"]
+        consensus.score(vhh)["composite_score"]
         con_mutant = consensus.score(mutant)["composite_score"]
         # At least one score should change (or both stay same – just verify they run)
         assert isinstance(hsc_mutant, float)
