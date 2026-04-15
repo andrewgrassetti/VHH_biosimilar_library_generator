@@ -487,8 +487,9 @@ class TestEpistasisDetection:
             {"mutations": "C15G", "combined_score": 0.05},
         ]
         interaction = _compute_epistasis(rows, (5, "V"), (10, "L"))
-        # score(A+B)=0.95, score(A)=0.325, score(B)=0.225, score(neither)=0.075
-        # interaction = 0.95 - 0.325 - 0.225 + 0.075 = 0.475 > 0
+        # Medians: A+B=0.95, A_only=0.325, B_only=0.225
+        # "neither" = C15G rows (no mut A or B): median=0.075
+        # interaction = 0.95 - 0.325 - 0.225 + 0.075 = 0.475 > 0  (synergistic)
         assert interaction > 0.0, f"Expected synergistic interaction, got {interaction}"
 
     def test_compute_epistasis_antagonistic(self) -> None:

@@ -46,6 +46,16 @@ _DIVERSITY_INJECTION_FRAC = 0.2
 _RESCORE_TOP_N_DEFAULT = 20
 _EPISTASIS_PAIR_LIMIT = 15
 
+# Anchor confidence scoring parameters
+_ANCHOR_FREQ_FLOOR = 0.3  # Minimum frequency to consider a candidate anchor
+_ANCHOR_FREQ_SCALE = 0.8  # freq_threshold = anchor_threshold * this factor
+_MARGINAL_SCALE = 10.0  # Scale marginal benefit to [0, 1] range
+_MARGINAL_OFFSET = 0.5  # Shift so neutral marginal benefit maps to 0.5
+_CONFIDENCE_W_FREQ = 0.4  # Weight of frequency in confidence score
+_CONFIDENCE_W_MARGINAL = 0.4  # Weight of marginal benefit in confidence score
+_CONFIDENCE_W_BASELINE = 0.2  # Baseline confidence for any passing candidate
+_ANTAGONISTIC_SCALE = 2.0  # Penalty multiplier for antagonistic interactions
+
 
 # ---------------------------------------------------------------------------
 # Progress reporting dataclass
@@ -1100,8 +1110,11 @@ class MutationEngine:
             for pos, aa in _parse_mut_str(r["mutations"]):
                 pa_counts[(pos, aa)] += 1
 
-        # Candidate anchors: those exceeding frequency threshold OR top 30%
-        freq_threshold = max(anchor_threshold * 0.8, 0.3)
+        # Candidate anchors: those exceeding a relaxed frequency threshold.
+        # _ANCHOR_FREQ_SCALE (0.8×) softens the user-set anchor_threshold so
+        # we don't miss borderline candidates; _ANCHOR_FREQ_FLOOR (0.3) is the
+        # absolute minimum to avoid pure noise.
+        freq_threshold = max(anchor_threshold * _ANCHOR_FREQ_SCALE, _ANCHOR_FREQ_FLOOR)
         candidates: dict[tuple[int, str], AnchorCandidate] = {}
         for (pos, aa), count in pa_counts.items():
             freq = count / n_top
@@ -1151,17 +1164,31 @@ class MutationEngine:
                 ca.interactions[key_b] = interaction
                 cb.interactions[key_a] = interaction
 
-        # 4. Confidence scoring: weighted combination
+        # 4. Confidence scoring: weighted combination of frequency, marginal
+        # benefit, and epistatic interactions.
+        # - freq_score: normalised frequency (capped at 1.0).
+        # - marginal_score: marginal benefit scaled by _MARGINAL_SCALE and
+        #   shifted by _MARGINAL_OFFSET so a neutral mutation maps to 0.5.
+        # - _CONFIDENCE_W_BASELINE: a small constant so any candidate that
+        #   passed frequency screening starts with non-zero confidence.
+        # - antagonistic_penalty: sum of negative interaction terms scaled by
+        #   _ANTAGONISTIC_SCALE — reduces confidence for mutations that clash
+        #   with other anchors.
         for cand in candidates.values():
             freq_score = min(cand.frequency / anchor_threshold, 1.0)
-            marginal_score = max(0.0, min(cand.marginal_benefit * 10 + 0.5, 1.0))
-            # Penalise strongly antagonistic interactions
+            marginal_score = max(
+                0.0,
+                min(cand.marginal_benefit * _MARGINAL_SCALE + _MARGINAL_OFFSET, 1.0),
+            )
             antagonistic_penalty = sum(
                 min(v, 0.0) for v in cand.interactions.values()
-            ) * 2.0
+            ) * _ANTAGONISTIC_SCALE
             cand.confidence = max(
                 0.0,
-                0.4 * freq_score + 0.4 * marginal_score + 0.2 + antagonistic_penalty,
+                _CONFIDENCE_W_FREQ * freq_score
+                + _CONFIDENCE_W_MARGINAL * marginal_score
+                + _CONFIDENCE_W_BASELINE
+                + antagonistic_penalty,
             )
 
         # Filter to reasonable confidence
