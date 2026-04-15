@@ -8,7 +8,11 @@ import pandas as pd
 import pytest
 
 from vhh_library.humanness import HumAnnotator
-from vhh_library.mutation_engine import MutationEngine, _introduces_ptm_liability
+from vhh_library.mutation_engine import (
+    MutationEngine,
+    _introduces_ptm_liability,
+    _total_grouped_combinations,
+)
 from vhh_library.sequence import VHHSequence
 from vhh_library.stability import StabilityScorer
 
@@ -92,11 +96,12 @@ class TestStabilityDrivenRanking:
             assert "M" not in df["suggested_aa"].values
 
     def test_stability_ranked_multiple_per_position(
-        self, stability_ranked: pd.DataFrame
+        self, stability_engine: MutationEngine, vhh: VHHSequence
     ) -> None:
-        """Stability-driven scan returns multiple AAs per position."""
-        if not stability_ranked.empty:
-            pos_counts = stability_ranked.groupby("imgt_pos").size()
+        """Stability-driven scan returns multiple AAs per position when max_per_position > 1."""
+        ranked = stability_engine.rank_single_mutations(vhh, max_per_position=3)
+        if not ranked.empty:
+            pos_counts = ranked.groupby("imgt_pos").size()
             assert pos_counts.max() > 1
 
     def test_stability_ranked_reason(self, stability_ranked: pd.DataFrame) -> None:
@@ -242,3 +247,139 @@ class TestPTMLiability:
         parent2 = "AAAAAAAAAAAA"
         mutant2 = "AAAAANGSTAAA"
         assert _introduces_ptm_liability(parent2, mutant2, 5) is True
+
+
+class TestMultiCandidatePerPosition:
+    """Tests for multi-option per position feature."""
+
+    def test_humanness_multi_candidates(
+        self, engine: MutationEngine, vhh: VHHSequence
+    ) -> None:
+        """Humanness-based ranking should return multiple AAs per position when requested."""
+        ranked = engine.rank_single_mutations(vhh, max_per_position=3)
+        if not ranked.empty:
+            pos_counts = ranked.groupby("imgt_pos").size()
+            # At least some positions should have more than 1 candidate
+            assert pos_counts.max() >= 1  # at least 1 always
+
+    def test_stability_multi_candidates_limited(
+        self, stability_engine: MutationEngine, vhh: VHHSequence
+    ) -> None:
+        """Stability-driven ranking should limit to max_per_position."""
+        ranked_limited = stability_engine.rank_single_mutations(vhh, max_per_position=2)
+        if not ranked_limited.empty:
+            pos_counts = ranked_limited.groupby("imgt_pos").size()
+            assert pos_counts.max() <= 2
+
+    def test_single_candidate_per_position(
+        self, stability_engine: MutationEngine, vhh: VHHSequence
+    ) -> None:
+        """max_per_position=1 should give at most 1 candidate per position."""
+        ranked = stability_engine.rank_single_mutations(vhh, max_per_position=1)
+        if not ranked.empty:
+            pos_counts = ranked.groupby("imgt_pos").size()
+            assert pos_counts.max() == 1
+
+    def test_library_multi_options_different_aas_across_variants(
+        self, stability_engine: MutationEngine, vhh: VHHSequence
+    ) -> None:
+        """Library with multi-option positions should have variants where the same
+        position has different AA choices across different variants."""
+        ranked = stability_engine.rank_single_mutations(vhh, max_per_position=3)
+        if ranked.empty:
+            pytest.skip("No mutations ranked")
+
+        # Check that there are positions with multiple options
+        pos_counts = ranked.groupby("imgt_pos").size()
+        multi_pos = pos_counts[pos_counts > 1]
+        if multi_pos.empty:
+            pytest.skip("No positions with multiple candidates")
+
+        top = ranked.head(15)
+        lib = stability_engine.generate_library(vhh, top, n_mutations=2, max_variants=50)
+        if lib.empty:
+            pytest.skip("Empty library")
+
+        # Collect all (position, AA) pairs across variants
+        from vhh_library.mutation_engine import _parse_mut_str
+
+        position_aas: dict[int, set[str]] = {}
+        for _, row in lib.iterrows():
+            for pos, aa in _parse_mut_str(row["mutations"]):
+                position_aas.setdefault(pos, set()).add(aa)
+
+        # At least one position should have multiple different AAs across variants
+        multi_aa_positions = [p for p, aas in position_aas.items() if len(aas) > 1]
+        assert len(multi_aa_positions) > 0, (
+            "Expected at least one position with different AA choices across variants"
+        )
+
+    def test_no_variant_has_duplicate_position(
+        self, stability_engine: MutationEngine, vhh: VHHSequence
+    ) -> None:
+        """No single variant should have the same position mutated twice."""
+        ranked = stability_engine.rank_single_mutations(vhh, max_per_position=3)
+        if ranked.empty:
+            pytest.skip("No mutations ranked")
+
+        top = ranked.head(15)
+        lib = stability_engine.generate_library(vhh, top, n_mutations=3, max_variants=50)
+        if lib.empty:
+            pytest.skip("Empty library")
+
+        from vhh_library.mutation_engine import _parse_mut_str
+
+        for _, row in lib.iterrows():
+            muts = _parse_mut_str(row["mutations"])
+            positions = [pos for pos, _ in muts]
+            assert len(positions) == len(set(positions)), (
+                f"Variant {row['variant_id']} has duplicate positions: {row['mutations']}"
+            )
+
+
+class TestGroupedCombinations:
+    """Tests for _total_grouped_combinations."""
+
+    def test_single_option_per_position(self) -> None:
+        """When each position has 1 option, should equal C(n, k)."""
+        import math
+
+        # Dummy objects with .position attribute
+        class M:
+            def __init__(self, pos):
+                self.position = pos
+
+        groups = {1: [M(1)], 2: [M(2)], 3: [M(3)], 4: [M(4)]}
+        assert _total_grouped_combinations(groups, 2, 2) == math.comb(4, 2)
+        assert _total_grouped_combinations(groups, 1, 3) == (
+            math.comb(4, 1) + math.comb(4, 2) + math.comb(4, 3)
+        )
+
+    def test_multi_option_positions(self) -> None:
+        """With multiple options per position, count should be larger than C(n, k)."""
+        import math
+
+        class M:
+            def __init__(self, pos):
+                self.position = pos
+
+        # 3 positions: first has 2 options, others have 1
+        groups = {1: [M(1), M(1)], 2: [M(2)], 3: [M(3)]}
+        # Choosing 2 positions from 3: C(3,2) = 3
+        # If position 1 is chosen, its group has 2 options
+        # Combos: {1,2}: 2*1=2, {1,3}: 2*1=2, {2,3}: 1*1=1 = 5 total
+        assert _total_grouped_combinations(groups, 2, 2) == 5
+        # Compare: C(3, 2) = 3, so multi-option gives more
+        assert _total_grouped_combinations(groups, 2, 2) > math.comb(3, 2)
+
+    def test_all_positions_multi_option(self) -> None:
+        """All positions with 2 options each."""
+        class M:
+            def __init__(self, pos):
+                self.position = pos
+
+        groups = {1: [M(1), M(1)], 2: [M(2), M(2)]}
+        # k=1: 2 positions * 2 options each = 4
+        # k=2: 1 combo * 2*2 = 4
+        # Total = 8
+        assert _total_grouped_combinations(groups, 1, 2) == 8

@@ -192,6 +192,11 @@ def sidebar():
         st.number_input("Min mutations", 1, 20, 1, key="min_mutations")
         st.number_input("Max mutations (n_mutations)", 1, 20, 3, key="n_mutations")
         st.number_input("Max variants", 100, 100_000, 1000, step=100, key="max_variants")
+        st.number_input(
+            "Max candidates per position", 1, 5, 3,
+            key="max_candidates_per_position",
+            help="Number of amino acid options to consider at each IMGT position",
+        )
         st.selectbox("Strategy", ["Auto", "Random", "Iterative"], key="strategy")
         st.slider("Anchor threshold", 0.0, 1.0, 0.6, 0.05, key="anchor_threshold")
         st.number_input("Max rounds", 1, 20, 5, key="max_rounds")
@@ -533,6 +538,7 @@ def tab_mutations(humanness_scorer, stability_scorer):
                 off_limits=off_limit_positions if off_limit_positions else None,
                 forbidden_substitutions=position_forbidden if position_forbidden else None,
                 excluded_target_aas=excluded_set,
+                max_per_position=st.session_state.get("max_candidates_per_position", 3),
             )
         st.session_state["ranked_mutations"] = ranked
         st.session_state["_mutation_engine"] = engine
@@ -540,6 +546,14 @@ def tab_mutations(humanness_scorer, stability_scorer):
 
     ranked = st.session_state.get("ranked_mutations")
     if ranked is not None and not ranked.empty:
+        # Highlight positions with multiple AA options.
+        pos_counts = ranked["imgt_pos"].value_counts()
+        multi_positions = set(pos_counts[pos_counts > 1].index)
+        if multi_positions:
+            st.caption(
+                f"Positions with multiple candidates: "
+                f"{', '.join(sorted(multi_positions, key=lambda p: int(''.join(c for c in p if c.isdigit()) or '0')))}"
+            )
         st.dataframe(ranked, use_container_width=True, hide_index=True)
 
         top_n = st.slider(

@@ -88,6 +88,51 @@ def _total_combinations(n: int, k_min: int, k_max: int) -> int:
     return total
 
 
+def _total_grouped_combinations(
+    position_groups: dict[int, list],
+    k_min: int,
+    k_max: int,
+) -> int:
+    """Count variants for the grouped-position model.
+
+    Each position has one or more candidate AAs.  A variant picks at most one
+    AA per position.  For a given *k* (number of positions to mutate), we:
+      1. Choose *k* positions from the available ones – C(n_positions, k).
+      2. For each chosen position, pick one of its AAs – product of group sizes.
+
+    Because groups may have different sizes we iterate over combinations of
+    position-groups (for small *n*) or estimate from the mean.  To keep it
+    cheap we use the exact formula:
+        total = Σ_{k=k_min}^{k_max} Σ_{S ⊂ positions, |S|=k} Π_{p∈S} |group_p|
+    This equals Σ_k  e_k(g_1, g_2, …, g_n)  where e_k is the k-th elementary
+    symmetric polynomial over the group sizes.
+    """
+    cap = 10**15
+    sizes = [len(v) for v in position_groups.values()]
+    n = len(sizes)
+    k_max = min(k_max, n)
+    k_min = min(k_min, k_max)
+
+    # Use DP for elementary symmetric polynomials: e[j] after processing i
+    # items equals the sum over all j-element subsets of the first i items of
+    # the product of their sizes.
+    e = [0] * (k_max + 1)
+    e[0] = 1
+    for sz in sizes:
+        # Iterate backwards to avoid using the same element twice.
+        for j in range(min(k_max, n), 0, -1):
+            e[j] += e[j - 1] * sz
+            if e[j] >= cap:
+                return cap
+
+    total = 0
+    for k in range(k_min, k_max + 1):
+        total += e[k]
+        if total >= cap:
+            return cap
+    return total
+
+
 def _imgt_key_to_int(pos_key: str) -> int:
     """Extract the integer portion from an IMGT position key (e.g. ``"111A"`` → 111)."""
     return int("".join(c for c in pos_key if c.isdigit()) or "0")
@@ -292,6 +337,7 @@ class MutationEngine:
         off_limits: Optional[set[int] | set[str]] = None,
         forbidden_substitutions: Optional[dict[int, set[str]] | dict[str, set[str]]] = None,
         excluded_target_aas: Optional[set[str]] = None,
+        max_per_position: int = 1,
     ) -> pd.DataFrame:
         if off_limits is None:
             off_limits = set()
@@ -311,6 +357,7 @@ class MutationEngine:
                 off_limits=off_limits,
                 forbidden_substitutions=forbidden_substitutions,
                 excluded_target_aas=excluded_target_aas,
+                max_per_position=max_per_position,
             )
         else:
             suggestions = self._generate_stability_candidates(
@@ -377,6 +424,13 @@ class MutationEngine:
         df = pd.DataFrame(rows)
         if not df.empty:
             df = df.sort_values("combined_score", ascending=False).reset_index(drop=True)
+            # Limit to max_per_position candidates per IMGT position.
+            if max_per_position > 0:
+                df = (
+                    df.groupby("imgt_pos", sort=False)
+                    .head(max_per_position)
+                    .reset_index(drop=True)
+                )
         return df
 
     # ------------------------------------------------------------------
@@ -423,20 +477,18 @@ class MutationEngine:
         if top_mutations.empty:
             return self._empty_library_df()
 
-        positions_seen: dict[int, list[int]] = {}
-        for idx, row in top_mutations.iterrows():
-            pos = int(row["position"])
-            positions_seen.setdefault(pos, []).append(idx)
+        # Keep all candidates (multiple AAs per position allowed).
+        mutation_list = list(top_mutations.itertuples(index=False))
 
-        unique_rows: list[int] = []
-        for indices in positions_seen.values():
-            unique_rows.append(indices[0])
-        unique_mutations = top_mutations.loc[unique_rows].reset_index(drop=True)
-        n_available = len(unique_mutations)
+        # Build position groups for combination counting.
+        position_groups: dict[int, list] = {}
+        for m in mutation_list:
+            position_groups.setdefault(int(m.position), []).append(m)
 
-        k_max = min(n_mutations, n_available)
+        n_positions = len(position_groups)
+        k_max = min(n_mutations, n_positions)
         k_min = min(min_mutations, k_max)
-        total = _total_combinations(n_available, k_min, k_max)
+        total = _total_grouped_combinations(position_groups, k_min, k_max)
 
         if strategy == "auto":
             if total <= _SAMPLING_THRESHOLD:
@@ -447,20 +499,20 @@ class MutationEngine:
                 strategy = "iterative"
 
         logger.info(
-            "Library generation: strategy=%s, n_available=%d, k_min=%d, k_max=%d, "
-            "total_combinations=%s",
+            "Library generation: strategy=%s, n_positions=%d, n_candidates=%d, "
+            "k_min=%d, k_max=%d, total_combinations=%s",
             strategy,
-            n_available,
+            n_positions,
+            len(mutation_list),
             k_min,
             k_max,
             total,
         )
 
-        mutation_list = list(unique_mutations.itertuples(index=False))
-
         if strategy == "exhaustive":
             rows = self._generate_exhaustive(
-                vhh_sequence, mutation_list, k_min, k_max, max_variants
+                vhh_sequence, mutation_list, k_min, k_max, max_variants,
+                position_groups=position_groups,
             )
         elif strategy == "random":
             rows = self._generate_sampled(
@@ -550,19 +602,30 @@ class MutationEngine:
         k_min: int,
         k_max: int,
         max_variants: int,
+        position_groups: dict[int, list] | None = None,
     ) -> list[dict]:
+        # Build position groups if not provided.
+        if position_groups is None:
+            position_groups = {}
+            for m in mutation_list:
+                position_groups.setdefault(int(m.position), []).append(m)
+
+        positions = list(position_groups.keys())
+        groups = [position_groups[p] for p in positions]
+
         rows: list[dict] = []
         counter = 1
         for k in range(k_min, k_max + 1):
-            for combo in itertools.combinations(mutation_list, k):
-                if self._has_position_conflict(combo):
-                    continue
-                rows.append(
-                    self._build_variant_row(vhh_sequence, list(combo), counter)
-                )
-                counter += 1
-                if len(rows) >= max_variants:
-                    return rows
+            for pos_indices in itertools.combinations(range(len(positions)), k):
+                # For each chosen set of positions, take the product of their AA options.
+                selected_groups = [groups[i] for i in pos_indices]
+                for aa_combo in itertools.product(*selected_groups):
+                    rows.append(
+                        self._build_variant_row(vhh_sequence, list(aa_combo), counter)
+                    )
+                    counter += 1
+                    if len(rows) >= max_variants:
+                        return rows
         return rows
 
     # ------------------------------------------------------------------
@@ -764,12 +827,11 @@ class MutationEngine:
 
     @staticmethod
     def _deduplicate_positions(sample: list) -> list:
-        seen: dict[int, object] = {}
+        groups: dict[int, list] = {}
         for m in sample:
             p = int(m.position)
-            if p not in seen:
-                seen[p] = m
-        return list(seen.values())
+            groups.setdefault(p, []).append(m)
+        return [random.choice(options) for options in groups.values()]
 
     # ------------------------------------------------------------------
     # Private: empty DataFrame helper
