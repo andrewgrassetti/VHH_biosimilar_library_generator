@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import warnings as _warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -90,6 +91,13 @@ class StabilityScorer:
         # Kept for backward compatibility; silently ignored.
         use_nanomelt: bool = False,
     ) -> None:
+        if use_nanomelt:
+            _warnings.warn(
+                "NanoMelt support has been removed; the use_nanomelt parameter is ignored "
+                "and will be removed in a future version.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         germline_path = _DATA_DIR / "vhh_germlines.json"
         with open(germline_path) as fh:
             self.germlines: list[dict] = json.load(fh)["germlines"]
