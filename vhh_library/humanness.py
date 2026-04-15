@@ -43,9 +43,9 @@ class HumAnnotator:
                 best_identity = identity
                 best_germline = name
 
-        position_scores: dict[int, float] = {}
+        position_scores: dict[str, float] = {}
         for pos, aa in vhh.imgt_numbered.items():
-            freq_dict = self.position_freq.get(str(pos))
+            freq_dict = self.position_freq.get(pos)
             if freq_dict is None:
                 continue
             position_scores[pos] = freq_dict.get(aa, freq_dict.get("other", 0.0))
@@ -68,18 +68,24 @@ class HumAnnotator:
     def get_mutation_suggestions(
         self,
         vhh: VHHSequence,
-        off_limits: set[int],
-        forbidden_substitutions: dict[int, set[str]] | None = None,
+        off_limits: set[int] | set[str],
+        forbidden_substitutions: dict[int, set[str]] | dict[str, set[str]] | None = None,
         excluded_target_aas: set[str] | None = None,
     ) -> list[dict]:
         cdr_positions = vhh.cdr_positions
+        # Normalise off_limits to string keys for consistent comparison.
+        off_limits_str = {str(p) for p in off_limits}
+        # Normalise forbidden_substitutions keys to strings.
+        forbidden_str: dict[str, set[str]] = {}
+        if forbidden_substitutions:
+            forbidden_str = {str(k): v for k, v in forbidden_substitutions.items()}
         suggestions: list[dict] = []
 
         for pos, aa in vhh.imgt_numbered.items():
-            if pos in off_limits or pos in cdr_positions:
+            if pos in off_limits_str or pos in cdr_positions:
                 continue
 
-            freq_dict = self.position_freq.get(str(pos))
+            freq_dict = self.position_freq.get(pos)
             if freq_dict is None:
                 continue
 
@@ -93,9 +99,9 @@ class HumAnnotator:
                 if excluded_target_aas and candidate in excluded_target_aas:
                     continue
                 if (
-                    forbidden_substitutions
-                    and pos in forbidden_substitutions
-                    and candidate in forbidden_substitutions[pos]
+                    forbidden_str
+                    and pos in forbidden_str
+                    and candidate in forbidden_str[pos]
                 ):
                     continue
                 if freq > best_freq:
