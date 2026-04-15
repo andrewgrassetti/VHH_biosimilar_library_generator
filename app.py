@@ -22,7 +22,7 @@ from vhh_library.calibration import (
     run_calibration as _run_calibration,
 )
 from vhh_library.codon_optimizer import CodonOptimizer
-from vhh_library.components.sequence_selector import sequence_selector
+from vhh_library.components.sequence_selector import imgt_key_int_part, sequence_selector
 from vhh_library.developability import SurfaceHydrophobicityScorer
 from vhh_library.humanness import HumAnnotator
 from vhh_library.library_manager import LibraryManager
@@ -446,13 +446,16 @@ def tab_mutations(humanness_scorer, stability_scorer):
 
     # -- Off-limit regions --
     st.subheader("Off-Limit Regions")
-    off_limit_positions: set[int] = set()
+    off_limit_positions: set[str] = set()
     region_cols = st.columns(len(IMGT_REGIONS))
     for idx, (region_name, (start, end)) in enumerate(IMGT_REGIONS.items()):
         with region_cols[idx]:
             default_off = region_name.startswith("CDR")
             if st.checkbox(region_name, value=default_off, key=f"ol_{region_name}"):
-                off_limit_positions.update(range(start, end + 1))
+                # Collect all IMGT keys (including insertion codes) within this region.
+                for imgt_key in vhh.imgt_numbered:
+                    if start <= imgt_key_int_part(imgt_key) <= end:
+                        off_limit_positions.add(imgt_key)
 
     # -- Forbidden substitutions CSV --
     st.subheader("Forbidden Substitutions")
@@ -460,7 +463,7 @@ def tab_mutations(humanness_scorer, stability_scorer):
         "Upload CSV (original_aa, forbidden_aas)", type=["csv"], key="forbidden_csv",
     )
     aa_forbidden: dict[str, set[str]] = {}
-    position_forbidden: dict[int, set[str]] = {}
+    position_forbidden: dict[str, set[str]] = {}
     if uploaded is not None:
         aa_forbidden = _parse_off_limit_csv(uploaded)
         position_forbidden = _aa_forbidden_to_position_forbidden(aa_forbidden, vhh.imgt_numbered)

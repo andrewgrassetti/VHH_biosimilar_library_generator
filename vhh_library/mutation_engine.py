@@ -216,8 +216,8 @@ class MutationEngine:
     def rank_single_mutations(
         self,
         vhh_sequence: VHHSequence,
-        off_limits: Optional[set[int]] = None,
-        forbidden_substitutions: Optional[dict[int, set[str]]] = None,
+        off_limits: Optional[set[int] | set[str]] = None,
+        forbidden_substitutions: Optional[dict[int, set[str]] | dict[str, set[str]]] = None,
         excluded_target_aas: Optional[set[str]] = None,
     ) -> pd.DataFrame:
         if off_limits is None:
