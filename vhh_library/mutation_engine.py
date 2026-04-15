@@ -12,16 +12,17 @@ from typing import TYPE_CHECKING, Optional
 import pandas as pd
 
 from vhh_library.developability import SurfaceHydrophobicityScorer
-from vhh_library.humanness import HumAnnotator
 from vhh_library.orthogonal_scoring import (
     ConsensusStabilityScorer,
     HumanStringContentScorer,
 )
 from vhh_library.sequence import VHHSequence
 from vhh_library.stability import StabilityScorer
+from vhh_library.utils import AMINO_ACIDS
 
 if TYPE_CHECKING:
     from vhh_library.esm_scorer import ESMStabilityScorer
+    from vhh_library.humanness import HumAnnotator
 
 logger = logging.getLogger(__name__)
 
@@ -99,20 +100,20 @@ class MutationEngine:
 
     def __init__(
         self,
-        humanness_scorer: HumAnnotator,
-        stability_scorer: StabilityScorer,
+        humanness_scorer: "HumAnnotator | None" = None,
+        stability_scorer: StabilityScorer | None = None,
         *,
         hydrophobicity_scorer: Optional[SurfaceHydrophobicityScorer] = None,
         hsc_scorer: Optional[HumanStringContentScorer] = None,
         consensus_scorer: Optional[ConsensusStabilityScorer] = None,
         esm_scorer: Optional[ESMStabilityScorer] = None,
-        w_humanness: float = 0.35,
-        w_stability: float = 0.50,
+        w_humanness: float = 0.0,
+        w_stability: float = 0.80,
         weights: Optional[dict[str, float]] = None,
         enabled_metrics: Optional[dict[str, bool]] = None,
     ) -> None:
         self._humanness_scorer = humanness_scorer
-        self._stability_scorer = stability_scorer
+        self._stability_scorer = stability_scorer if stability_scorer is not None else StabilityScorer()
         self._hydrophobicity_scorer = hydrophobicity_scorer
         self._hsc_scorer = hsc_scorer
         self._consensus_scorer = consensus_scorer
@@ -121,16 +122,17 @@ class MutationEngine:
         self.w_humanness = w_humanness
         self.w_stability = w_stability
 
+        has_humanness = humanness_scorer is not None
         self._weights: dict[str, float] = {
-            "humanness": 0.35,
-            "stability": 0.50,
-            "surface_hydrophobicity": 0.15,
+            "humanness": 0.0 if not has_humanness else 0.15,
+            "stability": 0.80,
+            "surface_hydrophobicity": 0.20 if not has_humanness else 0.05,
         }
         if weights is not None:
             self._weights.update(weights)
 
         self._enabled_metrics: dict[str, bool] = {
-            "humanness": True,
+            "humanness": has_humanness,
             "stability": True,
             "surface_hydrophobicity": False,
         }
@@ -177,11 +179,9 @@ class MutationEngine:
     # ------------------------------------------------------------------
 
     def _score_variant(self, vhh: VHHSequence) -> dict[str, float]:
-        hum = self._humanness_scorer.score(vhh)
         stab = self._stability_scorer.score(vhh)
 
         scores: dict[str, float] = {
-            "humanness": hum["composite_score"],
             "stability": stab["composite_score"],
             "aggregation_score": stab["aggregation_score"],
             "charge_balance_score": stab["charge_balance_score"],
@@ -190,6 +190,12 @@ class MutationEngine:
             "vhh_hallmark_score": stab["vhh_hallmark_score"],
             "scoring_method": stab["scoring_method"],
         }
+
+        if self._humanness_scorer is not None:
+            hum = self._humanness_scorer.score(vhh)
+            scores["humanness"] = hum["composite_score"]
+        else:
+            scores["humanness"] = 0.0
 
         if "predicted_tm" in stab:
             scores["predicted_tm"] = stab["predicted_tm"]
@@ -210,6 +216,68 @@ class MutationEngine:
         return sum(raw_scores.get(metric, 0.0) * w for metric, w in weights.items())
 
     # ------------------------------------------------------------------
+    # Stability-driven candidate generation
+    # ------------------------------------------------------------------
+
+    def _generate_stability_candidates(
+        self,
+        vhh_sequence: VHHSequence,
+        off_limits: set[str],
+        forbidden_substitutions: dict[str, set[str]] | None = None,
+        excluded_target_aas: set[str] | None = None,
+    ) -> list[dict]:
+        """Generate candidate mutations ranked by stability impact.
+
+        For each mutable position (respecting off-limits, CDRs, forbidden
+        substitutions, and excluded AAs), all 19 possible substitutions are
+        evaluated using :meth:`StabilityScorer.predict_mutation_effect`.
+        Mutations introducing PTM liabilities are filtered out.
+        """
+        cdr_positions = vhh_sequence.cdr_positions
+        parent_seq = vhh_sequence.sequence
+        forbidden_str: dict[str, set[str]] = {}
+        if forbidden_substitutions:
+            forbidden_str = {str(k): v for k, v in forbidden_substitutions.items()}
+        excluded = excluded_target_aas or set()
+
+        candidates: list[dict] = []
+
+        for pos_key, original_aa in vhh_sequence.imgt_numbered.items():
+            if pos_key in off_limits or pos_key in cdr_positions:
+                continue
+
+            seq_idx = vhh_sequence._pos_to_seq_idx.get(
+                pos_key, int("".join(c for c in pos_key if c.isdigit()) or "0") - 1
+            )
+
+            for candidate_aa in AMINO_ACIDS:
+                if candidate_aa == original_aa:
+                    continue
+                if candidate_aa in excluded:
+                    continue
+                if forbidden_str and pos_key in forbidden_str and candidate_aa in forbidden_str[pos_key]:
+                    continue
+
+                mutant = VHHSequence.mutate(vhh_sequence, pos_key, candidate_aa)
+                if _introduces_ptm_liability(parent_seq, mutant.sequence, seq_idx):
+                    continue
+
+                delta_stab = self._stability_scorer.predict_mutation_effect(
+                    vhh_sequence, pos_key, candidate_aa
+                )
+
+                candidates.append({
+                    "position": pos_key,
+                    "original_aa": original_aa,
+                    "suggested_aa": candidate_aa,
+                    "delta_stability": delta_stab,
+                    "reason": "Stability-driven scan",
+                })
+
+        candidates.sort(key=lambda c: c["delta_stability"], reverse=True)
+        return candidates
+
+    # ------------------------------------------------------------------
     # Single-mutation ranking
     # ------------------------------------------------------------------
 
@@ -223,12 +291,29 @@ class MutationEngine:
         if off_limits is None:
             off_limits = set()
 
-        suggestions = self._humanness_scorer.get_mutation_suggestions(
-            vhh_sequence,
-            off_limits=off_limits,
-            forbidden_substitutions=forbidden_substitutions,
-            excluded_target_aas=excluded_target_aas,
-        )
+        # Normalise off_limits to string keys
+        off_limits_str = {str(p) for p in off_limits}
+
+        # Normalise forbidden_substitutions keys to strings
+        forbidden_str: dict[str, set[str]] | None = None
+        if forbidden_substitutions:
+            forbidden_str = {str(k): v for k, v in forbidden_substitutions.items()}
+
+        # Choose candidate generation strategy
+        if self._humanness_scorer is not None:
+            suggestions = self._humanness_scorer.get_mutation_suggestions(
+                vhh_sequence,
+                off_limits=off_limits,
+                forbidden_substitutions=forbidden_substitutions,
+                excluded_target_aas=excluded_target_aas,
+            )
+        else:
+            suggestions = self._generate_stability_candidates(
+                vhh_sequence,
+                off_limits=off_limits_str,
+                forbidden_substitutions=forbidden_str,
+                excluded_target_aas=excluded_target_aas,
+            )
 
         parent_seq = vhh_sequence.sequence
         rows: list[dict] = []
@@ -239,17 +324,22 @@ class MutationEngine:
             new_aa: str = sug["suggested_aa"]
             original_aa: str = sug["original_aa"]
 
-            mutant = VHHSequence.mutate(vhh_sequence, pos_key, new_aa)
-            seq_idx = vhh_sequence._pos_to_seq_idx.get(pos_key, int(pos) - 1)
-            if _introduces_ptm_liability(parent_seq, mutant.sequence, seq_idx):
-                logger.debug(
-                    "Skipping %s%s%s: introduces PTM liability", original_aa, pos_key, new_aa
-                )
-                continue
+            # For humanness-sourced candidates, check PTM liability
+            # (stability candidates are already filtered)
+            if self._humanness_scorer is not None:
+                mutant = VHHSequence.mutate(vhh_sequence, pos_key, new_aa)
+                seq_idx = vhh_sequence._pos_to_seq_idx.get(pos_key, int(pos) - 1)
+                if _introduces_ptm_liability(parent_seq, mutant.sequence, seq_idx):
+                    logger.debug(
+                        "Skipping %s%s%s: introduces PTM liability", original_aa, pos_key, new_aa
+                    )
+                    continue
 
-            delta_hum = sug["delta_humanness"]
-            delta_stab = self._stability_scorer.predict_mutation_effect(
-                vhh_sequence, pos_key, new_aa
+            delta_hum = sug.get("delta_humanness", 0.0)
+            delta_stab = sug.get("delta_stability") if "delta_stability" in sug else (
+                self._stability_scorer.predict_mutation_effect(
+                    vhh_sequence, pos_key, new_aa
+                )
             )
             delta_sh = (
                 self.hydrophobicity_scorer.predict_mutation_effect(

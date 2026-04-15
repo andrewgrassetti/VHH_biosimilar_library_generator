@@ -56,11 +56,19 @@ st.set_page_config(
 def load_scorers():
     """Cache heavy scorer initialization."""
     h = HumAnnotator()
-    s = StabilityScorer()
+    # Create ESM-2 scorer if torch/esm are available, and pass to StabilityScorer
+    esm_scorer = None
+    if _esm2_pll_available():
+        try:
+            from vhh_library.esm_scorer import ESMStabilityScorer
+            esm_scorer = ESMStabilityScorer(model_tier="auto", device="auto")
+        except Exception:
+            pass
+    s = StabilityScorer(esm_scorer=esm_scorer)
     hydro = SurfaceHydrophobicityScorer()
     hsc = HumanStringContentScorer()
     cons = ConsensusStabilityScorer()
-    return h, s, hydro, hsc, cons
+    return h, s, hydro, hsc, cons, esm_scorer
 
 
 def load_calibration_data() -> dict | None:
@@ -158,21 +166,22 @@ def sidebar():
 
         # -- Scoring Weights --
         st.subheader("Scoring Weights")
-        enable_humanness = st.checkbox("Enable humanness", value=True, key="enable_humanness")
-        st.slider(
-            "Humanness weight", 0.0, 1.0, 0.35, 0.05,
-            disabled=not enable_humanness, key="w_humanness",
-        )
         enable_stability = st.checkbox("Enable stability", value=True, key="enable_stability")
         st.slider(
-            "Stability weight", 0.0, 1.0, 0.50, 0.05,
+            "Stability weight", 0.0, 1.0, 0.80, 0.05,
             disabled=not enable_stability, key="w_stability",
+        )
+        enable_humanness = st.checkbox("Enable humanness", value=False, key="enable_humanness",
+                                       help="Optional – uses humanness as an additional scoring axis")
+        st.slider(
+            "Humanness weight", 0.0, 1.0, 0.0, 0.05,
+            disabled=not enable_humanness, key="w_humanness",
         )
         enable_hydrophobicity = st.checkbox(
             "Enable surface hydrophobicity", value=True, key="enable_hydrophobicity",
         )
         st.slider(
-            "Surface hydrophobicity weight", 0.0, 1.0, 0.15, 0.05,
+            "Surface hydrophobicity weight", 0.0, 1.0, 0.20, 0.05,
             disabled=not enable_hydrophobicity, key="w_hydrophobicity",
         )
 
@@ -223,18 +232,10 @@ def sidebar():
         # -- ESM-2 PLL --
         st.subheader("ESM-2 Stability Scoring")
         esm2_available = _esm2_pll_available()
-        st.checkbox(
-            "Enable ESM-2 stability scoring",
-            value=False,
-            disabled=not esm2_available,
-            key="enable_esm2_pll",
-            help=(
-                "Uses ESM-2 protein language model for stability assessment. "
-                "Computationally expensive – recommended for final library ranking."
-            )
-            if esm2_available
-            else "Requires torch and fair-esm (included in default install)",
-        )
+        if esm2_available:
+            st.success("✅ ESM-2 is active and integrated into the stability scoring pipeline.")
+        else:
+            st.info("ESM-2 unavailable (torch / esm not installed). Reinstall with: pip install -e .")
         st.selectbox(
             "Model tier",
             options=["auto", "t6_8M", "t12_35M", "t33_650M", "t36_3B"],
@@ -244,12 +245,11 @@ def sidebar():
             help="auto = t6_8M on CPU, t33_650M on GPU",
         )
         st.slider(
-            "Top N variants for PLL",
+            "Top N variants for advanced re-ranking",
             1, 100, _ESM2_PLL_DEFAULT_TOP_N, key="esm2_top_n",
             disabled=not esm2_available,
+            help="Number of top variants to re-rank with a larger ESM-2 model (Tab 3 advanced option)",
         )
-        if not esm2_available:
-            st.info("ESM-2 unavailable (torch / esm not installed). Reinstall with: pip install -e .")
 
         st.divider()
 
@@ -497,32 +497,33 @@ def tab_mutations(humanness_scorer, stability_scorer):
 
     weights = {}
     enabled = {}
-    if st.session_state.get("enable_humanness", True):
-        weights["humanness"] = st.session_state.get("w_humanness", 0.35)
+    if st.session_state.get("enable_humanness", False):
+        weights["humanness"] = st.session_state.get("w_humanness", 0.0)
         enabled["humanness"] = True
     else:
         enabled["humanness"] = False
     if st.session_state.get("enable_stability", True):
-        weights["stability"] = st.session_state.get("w_stability", 0.50)
+        weights["stability"] = st.session_state.get("w_stability", 0.80)
         enabled["stability"] = True
     else:
         enabled["stability"] = False
     if st.session_state.get("enable_hydrophobicity", True):
-        weights["surface_hydrophobicity"] = st.session_state.get("w_hydrophobicity", 0.15)
+        weights["surface_hydrophobicity"] = st.session_state.get("w_hydrophobicity", 0.20)
         enabled["surface_hydrophobicity"] = True
     else:
         enabled["surface_hydrophobicity"] = False
 
     scorers = load_scorers()
-    _, _, hydrophobicity_scorer, hsc_scorer, consensus_scorer = scorers
+    _, _, hydrophobicity_scorer, hsc_scorer, consensus_scorer, esm_scorer = scorers
 
     if st.button("Rank single mutations", type="primary", key="btn_rank"):
         engine = MutationEngine(
-            humanness_scorer,
+            humanness_scorer if enabled.get("humanness") else None,
             stability_scorer,
             hydrophobicity_scorer=hydrophobicity_scorer if enabled.get("surface_hydrophobicity") else None,
             hsc_scorer=hsc_scorer,
             consensus_scorer=consensus_scorer,
+            esm_scorer=esm_scorer,
             weights=weights,
             enabled_metrics=enabled,
         )
@@ -588,15 +589,15 @@ def tab_library(viz):
     with mc2:
         st.metric("Mean Combined Score", f"{library['combined_score'].mean():.3f}")
     with mc3:
-        if "humanness_score" in library.columns:
-            st.metric("Mean Humanness", f"{library['humanness_score'].mean():.3f}")
+        if "stability_score" in library.columns:
+            st.metric("Mean Stability", f"{library['stability_score'].mean():.3f}")
 
     st.dataframe(library, use_container_width=True, hide_index=True)
 
     # -- Distribution plots --
     st.subheader("Score Distributions")
-    score_cols = [c for c in ["combined_score", "humanness_score", "stability_score",
-                               "surface_hydrophobicity_score"] if c in library.columns]
+    score_cols = [c for c in ["combined_score", "stability_score",
+                               "surface_hydrophobicity_score", "humanness_score"] if c in library.columns]
     if score_cols:
         fig, axes = plt.subplots(1, len(score_cols), figsize=(4 * len(score_cols), 3))
         if len(score_cols) == 1:
@@ -627,41 +628,54 @@ def tab_library(viz):
             st.pyplot(fig2)
             plt.close(fig2)
 
-    # -- ESM-2 PLL rescoring --
+    # -- ESM-2 Stability Scores --
     st.subheader("ESM-2 Stability Scoring")
-    if st.session_state.get("enable_esm2_pll") and _esm2_pll_available():
-        model_tier = st.session_state.get("esm2_model_tier", "auto")
-        top_n_esm = st.session_state.get("esm2_top_n", _ESM2_PLL_DEFAULT_TOP_N)
-        if st.button("Run ESM-2 Scoring", key="btn_esm2"):
-            from vhh_library.esm_scorer import ESMStabilityScorer
+    if _esm2_pll_available():
+        # Show existing ESM-2 scores if already computed in the pipeline
+        if "esm2_pll" in library.columns:
+            st.success("✅ ESM-2 scores are integrated into the library scoring pipeline.")
+            esm_cols = [c for c in ["variant_id", "aa_sequence", "combined_score",
+                                     "esm2_pll", "esm2_delta_pll", "esm2_rank"]
+                        if c in library.columns]
+            st.dataframe(
+                library[esm_cols].sort_values("esm2_pll", ascending=False).head(20),
+                use_container_width=True, hide_index=True,
+            )
+        elif "predicted_tm" in library.columns:
+            st.info("ESM-2 is active in the stability scorer. Predicted Tm values are included above.")
 
-            subset = library.nlargest(top_n_esm, "combined_score")
-            seqs = subset["aa_sequence"].tolist()
-            progress_bar = st.progress(0, text="Initialising ESM-2 model…")
-            try:
-                scorer = ESMStabilityScorer(model_tier=model_tier, device="auto")
-                progress_bar.progress(10, text="Computing ESM-2 PLL scores…")
-                pll_scores = scorer.score_batch(seqs)
-                progress_bar.progress(100, text="Done!")
-            except Exception as exc:
-                st.error(f"ESM-2 scoring failed: {exc}")
-                progress_bar.empty()
-                pll_scores = None
+        # Advanced: re-rank with a specific (potentially larger) model tier
+        with st.expander("Advanced: Re-rank top variants with a specific ESM-2 model"):
+            model_tier = st.session_state.get("esm2_model_tier", "auto")
+            top_n_esm = st.session_state.get("esm2_top_n", _ESM2_PLL_DEFAULT_TOP_N)
+            if st.button("Re-rank with ESM-2", key="btn_esm2"):
+                from vhh_library.esm_scorer import ESMStabilityScorer
 
-            if pll_scores is not None:
-                pll_df = subset[["variant_id", "aa_sequence", "combined_score"]].copy()
-                pll_df["esm2_pll"] = pll_scores
-                pll_df = pll_df.sort_values("esm2_pll", ascending=False)
-                st.session_state["esm2_pll_scores"] = pll_df
-                st.success("ESM-2 scoring complete.")
+                subset = library.nlargest(top_n_esm, "combined_score")
+                seqs = subset["aa_sequence"].tolist()
+                progress_bar = st.progress(0, text="Initialising ESM-2 model…")
+                try:
+                    scorer = ESMStabilityScorer(model_tier=model_tier, device="auto")
+                    progress_bar.progress(10, text="Computing ESM-2 PLL scores…")
+                    pll_scores = scorer.score_batch(seqs)
+                    progress_bar.progress(100, text="Done!")
+                except Exception as exc:
+                    st.error(f"ESM-2 scoring failed: {exc}")
+                    progress_bar.empty()
+                    pll_scores = None
 
-        pll_df = st.session_state.get("esm2_pll_scores")
-        if pll_df is not None:
-            st.dataframe(pll_df, use_container_width=True, hide_index=True)
-    elif not _esm2_pll_available():
-        st.info("ESM-2 not available (torch / esm not found). Reinstall with: pip install -e .")
+                if pll_scores is not None:
+                    pll_df = subset[["variant_id", "aa_sequence", "combined_score"]].copy()
+                    pll_df["esm2_pll"] = pll_scores
+                    pll_df = pll_df.sort_values("esm2_pll", ascending=False)
+                    st.session_state["esm2_pll_scores"] = pll_df
+                    st.success("ESM-2 re-ranking complete.")
+
+            pll_df = st.session_state.get("esm2_pll_scores")
+            if pll_df is not None:
+                st.dataframe(pll_df, use_container_width=True, hide_index=True)
     else:
-        st.info("Enable ESM-2 stability scoring in the sidebar to rescore top variants.")
+        st.info("ESM-2 not available (torch / esm not found). Reinstall with: pip install -e .")
 
     # -- Downloads --
     st.subheader("Download Library")
@@ -1022,7 +1036,7 @@ def tab_history():
 def main():
     init_state()
     scorers = load_scorers()
-    humanness_scorer, stability_scorer, hydrophobicity_scorer, hsc_scorer, consensus_scorer = scorers
+    humanness_scorer, stability_scorer, hydrophobicity_scorer, hsc_scorer, consensus_scorer, esm_scorer = scorers
     optimizer = CodonOptimizer()
     tag_manager = TagManager()
     viz = SequenceVisualizer()
