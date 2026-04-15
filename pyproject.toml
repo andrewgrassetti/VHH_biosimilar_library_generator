@@ -28,8 +28,7 @@ ml = [
     # Kept for backward compatibility; torch and fair-esm are now core deps.
 ]
 nanomelt = [
-    "nanomelt",
-    "biopython",
+    # NanoMelt support has been removed.
 ]
 dev = [
     "pytest>=7.0",
