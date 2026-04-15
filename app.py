@@ -1072,7 +1072,7 @@ def tab_validation(stability_scorer):
         # Compute per-residue PLLs from ESM data if available
         per_residue_plls = None
         if len(esm_plls) == len(seqs):
-            per_residue_plls = [pll / max(len(s), 1) for pll, s in zip(esm_plls, seqs)]
+            per_residue_plls = [pll / max(len(seq), 1) for pll, seq in zip(esm_plls, seqs)]
 
         report = run_benchmark(
             benchmark_vhhs=benchmark_vhhs,
@@ -1166,7 +1166,7 @@ def tab_validation(stability_scorer):
         if scoring_results and len(scoring_results) > 1 and exp_tms:
             st.markdown("#### Scoring Method Comparison")
             comparison = compare_scoring_methods(
-                [""] * len(exp_tms), exp_tms, scoring_results,
+                exp_tms, scoring_results,
             )
             if comparison:
                 comp_data = [

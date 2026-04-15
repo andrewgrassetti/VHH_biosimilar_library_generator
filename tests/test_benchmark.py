@@ -326,10 +326,8 @@ class TestValidateLibraryPredictions:
 
 class TestCompareScoringMethods:
     def test_compare_multiple_methods(self):
-        seqs = ["A" * 100] * 5
         exp_tms = [50.0, 55.0, 60.0, 65.0, 70.0]
         results = compare_scoring_methods(
-            seqs,
             exp_tms,
             {
                 "method_good": [51.0, 54.0, 61.0, 64.0, 69.0],
@@ -342,7 +340,6 @@ class TestCompareScoringMethods:
 
     def test_skips_mismatched_lengths(self):
         results = compare_scoring_methods(
-            ["A"] * 3,
             [50.0, 60.0, 70.0],
             {"bad_method": [1.0, 2.0]},  # wrong length
         )

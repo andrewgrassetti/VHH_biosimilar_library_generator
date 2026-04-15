@@ -435,7 +435,6 @@ def validate_library_predictions(
 
 
 def compare_scoring_methods(
-    sequences: list[str],
     experimental_tms: list[float],
     scoring_results: dict[str, list[float]],
 ) -> dict[str, CorrelationMetrics]:
@@ -443,8 +442,6 @@ def compare_scoring_methods(
 
     Parameters
     ----------
-    sequences:
-        VHH sequences (unused directly, but kept for API symmetry).
     experimental_tms:
         Known Tm values.
     scoring_results:
