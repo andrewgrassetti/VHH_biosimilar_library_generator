@@ -142,10 +142,10 @@ class NanoMeltStabilityScorer:
     ) -> float:
         if not self.is_available:
             return 0.0
-        pos_int = int(position) if not isinstance(position, int) else position
-        if pos_int < 1 or pos_int > vhh.length:
+        pos_key = str(position)
+        if pos_key not in vhh.imgt_numbered:
             return 0.0
-        if vhh.imgt_numbered.get(str(position)) == new_aa:
+        if vhh.imgt_numbered[pos_key] == new_aa:
             return 0.0
         mutant = VHHSequence.mutate(vhh, position, new_aa)
         return self.score(mutant)["composite_score"] - self.score(vhh)["composite_score"]

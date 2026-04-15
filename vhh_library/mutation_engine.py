@@ -280,7 +280,7 @@ class MutationEngine:
 
             rows.append(
                 {
-                    "position": int(pos_key),
+                    "position": int("".join(c for c in pos_key if c.isdigit()) or "0"),
                     "imgt_pos": pos_key,
                     "original_aa": original_aa,
                     "suggested_aa": new_aa,

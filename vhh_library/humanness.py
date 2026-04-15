@@ -73,10 +73,16 @@ class HumAnnotator:
         excluded_target_aas: set[str] | None = None,
     ) -> list[dict]:
         cdr_positions = vhh.cdr_positions
+        # Normalise off_limits to string keys for consistent comparison.
+        off_limits_str = {str(p) for p in off_limits}
+        # Normalise forbidden_substitutions keys to strings.
+        forbidden_str: dict[str, set[str]] = {}
+        if forbidden_substitutions:
+            forbidden_str = {str(k): v for k, v in forbidden_substitutions.items()}
         suggestions: list[dict] = []
 
         for pos, aa in vhh.imgt_numbered.items():
-            if pos in off_limits or str(pos) in off_limits or pos in cdr_positions:
+            if pos in off_limits_str or pos in cdr_positions:
                 continue
 
             freq_dict = self.position_freq.get(pos)
@@ -93,9 +99,9 @@ class HumAnnotator:
                 if excluded_target_aas and candidate in excluded_target_aas:
                     continue
                 if (
-                    forbidden_substitutions
-                    and pos in forbidden_substitutions
-                    and candidate in forbidden_substitutions[pos]
+                    forbidden_str
+                    and pos in forbidden_str
+                    and candidate in forbidden_str[pos]
                 ):
                     continue
                 if freq > best_freq:
