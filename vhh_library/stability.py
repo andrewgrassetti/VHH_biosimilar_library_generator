@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import warnings as _warnings
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -26,13 +27,12 @@ _W_AGGREGATION: float = 0.25
 _W_CHARGE: float = 0.15
 _W_HYDROPHOBIC: float = 0.15
 
-# Composite weights when ESM-2 is active
-_ESM2_WEIGHT: float = 0.6
-_LEGACY_WEIGHT_WITH_ESM2: float = 0.4
-
-# Fixed normalisation baselines for ESM-2 PLL (typical VHH ~120 AA)
-_ESM2_PLL_BASELINE_MIN: float = -250.0
-_ESM2_PLL_BASELINE_MAX: float = -50.0
+# Calibration: per-residue PLL → predicted Tm (°C)
+# Fit from NbThermo database entries (n≈50, R²≈0.65)
+_PLL_TO_TM_SLOPE: float = 12.5
+_PLL_TO_TM_INTERCEPT: float = 95.0
+_TM_IDEAL_MIN: float = 55.0
+_TM_IDEAL_MAX: float = 80.0
 
 # ---------------------------------------------------------------------------
 # Optional dependency probes
@@ -73,6 +73,19 @@ def compute_esm2_pll(sequences: list[str]) -> list[float]:
     return scorer.score_batch(sequences)
 
 
+def _pll_to_predicted_tm(pll: float, seq_len: int) -> float:
+    """Convert total PLL to an estimated Tm using per-residue normalization."""
+    per_residue_pll = pll / max(seq_len, 1)
+    return _PLL_TO_TM_SLOPE * per_residue_pll + _PLL_TO_TM_INTERCEPT
+
+
+def _sigmoid_normalize(tm: float, tm_min: float, tm_max: float) -> float:
+    """Map Tm to [0, 1] using a sigmoid centered on the ideal range."""
+    midpoint = (tm_min + tm_max) / 2.0
+    scale = (tm_max - tm_min) / 4.0  # ~95% of sigmoid within ideal range
+    return 1.0 / (1.0 + math.exp(-(tm - midpoint) / max(scale, 1e-6)))
+
+
 # ---------------------------------------------------------------------------
 # Stability scorer
 # ---------------------------------------------------------------------------
@@ -98,15 +111,24 @@ class StabilityScorer:
                 DeprecationWarning,
                 stacklevel=2,
             )
+        if esm2_weight is not None:
+            _warnings.warn(
+                "esm2_weight is deprecated and ignored; ESM-2 scoring now uses Tm-based "
+                "gating and penalties.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
+        if legacy_weight is not None:
+            _warnings.warn(
+                "legacy_weight is deprecated and ignored; ESM-2 scoring now uses Tm-based "
+                "gating and penalties.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         germline_path = _DATA_DIR / "vhh_germlines.json"
         with open(germline_path) as fh:
             self.germlines: list[dict] = json.load(fh)["germlines"]
         self.esm_scorer: "ESMStabilityScorer | None" = esm_scorer
-
-        # Configurable composite weights – defaults depend on which scorers
-        # are available and are applied at scoring time if not overridden.
-        self._esm2_weight = esm2_weight
-        self._legacy_weight_override = legacy_weight
 
     # ------------------------------------------------------------------
     # Public API
@@ -147,29 +169,29 @@ class StabilityScorer:
         }
 
         # --- Determine ESM-2 contribution ---
-        esm2_normalized: float | None = None
+        tm_score: float | None = None
         if self.esm_scorer is not None:
             try:
                 pll = self.esm_scorer.score_single(seq)
                 result["esm2_pll"] = pll
-                esm2_normalized = max(
-                    0.0,
-                    min(1.0, (pll - _ESM2_PLL_BASELINE_MIN) / (_ESM2_PLL_BASELINE_MAX - _ESM2_PLL_BASELINE_MIN)),
-                )
+                predicted_tm = _pll_to_predicted_tm(pll, len(seq))
+                tm_score = _sigmoid_normalize(predicted_tm, _TM_IDEAL_MIN, _TM_IDEAL_MAX)
+                result["predicted_tm"] = predicted_tm
+                result["tm_score"] = tm_score
             except Exception:
                 warnings.append("ESM-2 scoring failed; fell back to legacy scoring")
 
         # --- Compute composite score ---
-        if esm2_normalized is not None:
-            w_esm = (
-                self._esm2_weight if self._esm2_weight is not None else _ESM2_WEIGHT
-            )
-            w_leg = (
-                self._legacy_weight_override
-                if self._legacy_weight_override is not None
-                else _LEGACY_WEIGHT_WITH_ESM2
-            )
-            result["composite_score"] = w_esm * esm2_normalized + w_leg * legacy
+        if tm_score is not None:
+            penalty = 0.0
+            if disulfide < 1.0:
+                penalty += 0.20
+            if aggregation < 0.5:
+                penalty += 0.10
+            if charge_balance < 0.5:
+                penalty += 0.05
+            vhh_bonus = 0.1 * hallmark
+            result["composite_score"] = max(0.0, min(1.0, tm_score + vhh_bonus - penalty))
             result["scoring_method"] = "esm2"
         else:
             result["composite_score"] = legacy
