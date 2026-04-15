@@ -141,7 +141,7 @@ def _harmonized_codons(aa_sequence: str, table: dict[str, dict[str, float]]) -> 
 
 
 def _gc_balanced_codons(aa_sequence: str, table: dict[str, dict[str, float]]) -> str:
-    """Return a DNA sequence that targets 50 %% GC content using available codons."""
+    """Return a DNA sequence that targets 50% GC content using available codons."""
     codons_out: list[str] = []
     for aa in aa_sequence:
         if aa == "*":
@@ -261,7 +261,8 @@ class CodonOptimizer:
             or ``"dnachisel_optimized"``.
         restriction_enzymes:
             Enzyme names whose recognition sites should be avoided
-            (only used by ``dnachisel_optimized``).  *None* ⟶ default list.
+            (only used by ``dnachisel_optimized``).  Defaults to the
+            standard list when *None*.
         gc_window:
             Sliding-window size for GC-content constraint (bp).
         gc_mini / gc_maxi:
@@ -365,8 +366,9 @@ class CodonOptimizer:
             pattern = f"{enzyme}_site"
             try:
                 constraints.append(AvoidPattern(pattern))
-            except Exception:
-                # Fall back to raw recognition sequence
+            except (ValueError, KeyError):
+                # DnaChisel doesn't recognise this enzyme name; fall back to
+                # the raw recognition sequence if we know it.
                 if enzyme in _RESTRICTION_SITE_SEQS:
                     constraints.append(AvoidPattern(_RESTRICTION_SITE_SEQS[enzyme]))
 
@@ -379,8 +381,8 @@ class CodonOptimizer:
         if avoid_hairpins:
             try:
                 constraints.append(AvoidHairpins())
-            except Exception:
-                pass  # graceful degradation
+            except (TypeError, ValueError, ImportError):
+                pass  # AvoidHairpins unavailable or unsupported in this version
 
         if uniquify_kmers is not None and seq_len >= uniquify_kmers:
             constraints.append(UniquifyAllKmers(k=uniquify_kmers))

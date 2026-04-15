@@ -87,3 +87,20 @@ class TestDnaChiselOptimized:
     def test_h_sapiens_dnachisel(self, optimizer: CodonOptimizer) -> None:
         result = optimizer.optimize("MKTL", host="h_sapiens", strategy="dnachisel_optimized")
         assert translate(result["dna_sequence"]) == "MKTL"
+
+    def test_custom_restriction_enzymes(self, optimizer: CodonOptimizer) -> None:
+        result = optimizer.optimize(
+            SHORT_AA, host="e_coli", strategy="dnachisel_optimized",
+            restriction_enzymes=["BamHI", "EcoRI"],
+        )
+        dna = result["dna_sequence"]
+        assert "GGATCC" not in dna
+        assert "GAATTC" not in dna
+
+
+class TestFallbackTable:
+    def test_p_pastoris_uses_fallback(self, optimizer: CodonOptimizer) -> None:
+        """p_pastoris is not bundled in python-codon-tables; verify the embedded fallback works."""
+        result = optimizer.optimize("MKTL", host="p_pastoris", strategy="most_frequent")
+        assert translate(result["dna_sequence"]) == "MKTL"
+        assert result["organism"] == "p_pastoris"
