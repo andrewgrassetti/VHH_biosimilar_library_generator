@@ -1,19 +1,33 @@
 # VHH Biosimilar Library Generator
 
-A computational pipeline for designing humanised VHH (nanobody) variant libraries with multi-objective scoring, codon optimisation, and LC-MS/MS barcoding support.
+A computational pipeline for designing producible VHH (nanobody) variant libraries with multi-objective scoring, codon optimisation, and LC-MS/MS barcoding support.
 
 ## Features
 
-- **Humanness Scoring** — Compares framework regions to human VH germlines using identity and position-frequency matrices
 - **Stability Prediction** — Multi-factor scoring (disulfide bonds, aggregation propensity, charge balance, VHH hallmarks) with ESM-2 protein language model integration
-- **Nativeness Scoring** — AbNatiV VQ-VAE assessment of VHH nativeness (how closely a sequence resembles natural camelid nanobody repertoires)
-- **Orthogonal Validation** — Independent scoring via Human String Content (HSC) and germline consensus methods
+- **Nativeness Scoring** — AbNatiV VQ-VAE assessment of VHH nativeness (how closely a sequence resembles natural camelid nanobody repertoires) — integrated as a mandatory scoring axis
+- **Orthogonal Validation** — Independent scoring via germline consensus methods
 - **Mutation Engine** — Ranks single-point mutations and generates combinatorial variant libraries with three strategies (exhaustive, random sampling, iterative anchor-and-explore refinement)
 - **Developability Assessment** — PTM liability detection, surface hydrophobicity patches, clearance risk scoring
 - **Codon Optimisation** — Organism-specific codon usage tables (E. coli, H. sapiens, P. pastoris, S. cerevisiae) with CAI calculation and restriction site flagging
 - **Construct Builder** — Automated tag/linker assembly with DNA encoding
 - **Peptide Barcoding** — Unique trypsin-cleavable barcodes for multiplexed LC-MS/MS screening
 - **ESM-2 PLL Rescoring** — Protein language model validation (PyTorch & fair-esm included by default)
+
+## Scoring & Ranking
+
+The pipeline uses a produceability-oriented workflow built around two primary scoring axes:
+
+1. **ESM-2 Stability** — Protein language model pseudo-log-likelihood scoring, calibrated to predicted melting temperature (Tm)
+2. **AbNatiV Nativeness** — VQ-VAE model assessing how closely a VHH sequence resembles natural camelid nanobody repertoires
+
+Variants are ranked by a composite score:
+
+```
+composite_score = w_stability × normalized_stability + w_nativeness × normalized_nativeness
+```
+
+Default weights: `w_stability = 0.70`, `w_nativeness = 0.30`. Surface hydrophobicity can optionally be enabled as an additional scoring axis.
 
 ## Installation
 
@@ -24,15 +38,10 @@ source .venv/bin/activate   # Linux / macOS
 # .venv\Scripts\activate    # Windows
 ```
 
-Install the package in editable mode (includes ESM-2 / PyTorch by default):
+Install the package in editable mode (includes ESM-2 / PyTorch and AbNatiV by default):
 ```bash
 pip install -e .
-```
-
-To enable AbNatiV nativeness scoring (optional):
-```bash
-pip install -e ".[nativeness]"
-abnativ init  # download model weights
+abnativ init  # download AbNatiV model weights
 ```
 
 ## Usage
@@ -40,6 +49,15 @@ abnativ init  # download model weights
 ```bash
 streamlit run app.py
 ```
+
+### Default Workflow
+
+1. **Input & Analysis** — Paste a VHH sequence; the tool scores it for stability, nativeness, and surface hydrophobicity
+2. **Mutation Selection** — Configure off-limit regions and rank single-point mutations by combined stability + nativeness score
+3. **Library Generation** — Generate a combinatorial variant library from top-ranked mutations
+4. **Library Results** — View, filter, and download the scored library with stability/nativeness/composite scores
+5. **Barcoding** — Optionally assign LC-MS/MS barcodes
+6. **Construct Builder** — Build codon-optimised DNA constructs with tags/linkers
 
 ## Running Tests
 
@@ -61,11 +79,11 @@ pytest
 │   └── codon_tables/               # Organism-specific codon usage tables
 ├── vhh_library/
 │   ├── sequence.py                 # VHHSequence with cached properties & fast mutation
-│   ├── humanness.py                # Humanness scoring (HumAnnotator)
+│   ├── humanness.py                # Humanness scoring (HumAnnotator) — legacy, not used in main workflow
 │   ├── stability.py                # Stability scoring with ESM-2 integration
-│   ├── nativeness.py               # AbNatiV nativeness scoring (optional)
+│   ├── nativeness.py               # AbNatiV nativeness scoring (required)
 │   ├── developability.py           # PTM, clearance risk, surface hydrophobicity
-│   ├── orthogonal_scoring.py       # HSC, consensus scorers
+│   ├── orthogonal_scoring.py       # Consensus stability scorer
 │   ├── mutation_engine.py          # Mutation ranking & library generation
 │   ├── codon_optimizer.py          # Codon optimisation (4 organisms)
 │   ├── tags.py                     # Tag/linker construct assembly
@@ -83,13 +101,12 @@ Compared to the original implementation, this rewrite addresses several ineffici
 
 1. **Cached properties** — `VHHSequence.regions`, `cdr_positions`, and `framework_positions` are computed once and cached via `functools.cached_property`
 2. **Fast mutation path** — `VHHSequence.mutate()` creates mutant sequences without redundant validation, eliminating the overhead of re-validating known-good variants during library generation
-3. **Precomputed germline frameworks** — `HumAnnotator` concatenates germline framework strings once at init instead of on every `score()` call
-4. **Consolidated utilities** — Shared `net_charge` and `isoelectric_point` functions in `utils.py` with tolerance-based bisection convergence (vs. fixed 1000 iterations)
-5. **frozenset for amino acids** — O(1) membership checks instead of O(n) list lookups
-6. **stdlib random** — `CodonOptimizer` uses `random.choices` instead of NumPy for the harmonised strategy
-7. **Deduplicated hydrophobicity scale** — Single source of truth in `AA_PROPERTIES` used by both `barcodes.py` and `developability.py`
-8. **Lazy scorer initialisation** — Optional scorers (ESM-2) are only loaded on demand
-9. **`__slots__`** on `VHHSequence` for reduced memory footprint during large library generation
+3. **Consolidated utilities** — Shared `net_charge` and `isoelectric_point` functions in `utils.py` with tolerance-based bisection convergence (vs. fixed 1000 iterations)
+4. **frozenset for amino acids** — O(1) membership checks instead of O(n) list lookups
+5. **stdlib random** — `CodonOptimizer` uses `random.choices` instead of NumPy for the harmonised strategy
+6. **Deduplicated hydrophobicity scale** — Single source of truth in `AA_PROPERTIES` used by both `barcodes.py` and `developability.py`
+7. **Lazy scorer initialisation** — Optional scorers (ESM-2) are only loaded on demand
+8. **`__slots__`** on `VHHSequence` for reduced memory footprint during large library generation
 
 ## Citations
 
