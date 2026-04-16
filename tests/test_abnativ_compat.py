@@ -11,6 +11,7 @@ import pytest
 class TestPatchAbnativPlatform:
     """Verify the os.uname shim installs correctly and is idempotent."""
 
+    @pytest.mark.skipif(not hasattr(os, "uname"), reason="os.uname not available (Windows)")
     def test_idempotent_on_unix(self) -> None:
         """On Unix (where os.uname exists), patching does nothing harmful."""
         from vhh_library._abnativ_compat import patch_abnativ_platform
@@ -26,10 +27,11 @@ class TestPatchAbnativPlatform:
 
         # Reset patch state so we can re-test
         compat_mod._PATCHED = False
-        original_uname = os.uname
+        original_uname = getattr(os, "uname", None)
 
         try:
-            del os.uname  # type: ignore[attr-defined]
+            if hasattr(os, "uname"):
+                del os.uname  # type: ignore[attr-defined]
             compat_mod.patch_abnativ_platform()
 
             # The shim should now exist
@@ -39,8 +41,11 @@ class TestPatchAbnativPlatform:
             assert isinstance(result.sysname, str)
             assert len(result.sysname) > 0
         finally:
-            # Restore original os.uname
-            os.uname = original_uname  # type: ignore[attr-defined]
+            # Restore original os.uname (or remove shim if it wasn't there)
+            if original_uname is not None:
+                os.uname = original_uname  # type: ignore[attr-defined]
+            elif hasattr(os, "uname"):
+                del os.uname  # type: ignore[attr-defined]
             compat_mod._PATCHED = False
 
     def test_shim_sysname_matches_platform(self) -> None:
@@ -50,16 +55,20 @@ class TestPatchAbnativPlatform:
         import vhh_library._abnativ_compat as compat_mod
 
         compat_mod._PATCHED = False
-        original_uname = os.uname
+        original_uname = getattr(os, "uname", None)
 
         try:
-            del os.uname  # type: ignore[attr-defined]
+            if hasattr(os, "uname"):
+                del os.uname  # type: ignore[attr-defined]
             compat_mod.patch_abnativ_platform()
 
             result = os.uname()
             assert result.sysname == platform.system()
         finally:
-            os.uname = original_uname  # type: ignore[attr-defined]
+            if original_uname is not None:
+                os.uname = original_uname  # type: ignore[attr-defined]
+            elif hasattr(os, "uname"):
+                del os.uname  # type: ignore[attr-defined]
             compat_mod._PATCHED = False
 
     def test_patch_is_idempotent(self) -> None:

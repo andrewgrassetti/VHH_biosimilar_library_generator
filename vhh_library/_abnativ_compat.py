@@ -49,6 +49,7 @@ def patch_abnativ_platform() -> None:
             version = platform.version()
             machine = platform.machine()
 
-        os.uname = lambda: _UnameResult()  # type: ignore[attr-defined]
+        _cached_result = _UnameResult()
+        os.uname = lambda: _cached_result  # type: ignore[attr-defined]
 
     _PATCHED = True
