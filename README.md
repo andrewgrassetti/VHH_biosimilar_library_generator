@@ -6,6 +6,7 @@ A computational pipeline for designing humanised VHH (nanobody) variant librarie
 
 - **Humanness Scoring** — Compares framework regions to human VH germlines using identity and position-frequency matrices
 - **Stability Prediction** — Multi-factor scoring (disulfide bonds, aggregation propensity, charge balance, VHH hallmarks) with ESM-2 protein language model integration
+- **Nativeness Scoring** — AbNatiV VQ-VAE assessment of VHH nativeness (how closely a sequence resembles natural camelid nanobody repertoires)
 - **Orthogonal Validation** — Independent scoring via Human String Content (HSC) and germline consensus methods
 - **Mutation Engine** — Ranks single-point mutations and generates combinatorial variant libraries with three strategies (exhaustive, random sampling, iterative anchor-and-explore refinement)
 - **Developability Assessment** — PTM liability detection, surface hydrophobicity patches, clearance risk scoring
@@ -26,6 +27,12 @@ source .venv/bin/activate   # Linux / macOS
 Install the package in editable mode (includes ESM-2 / PyTorch by default):
 ```bash
 pip install -e .
+```
+
+To enable AbNatiV nativeness scoring (optional):
+```bash
+pip install -e ".[nativeness]"
+abnativ init  # download model weights
 ```
 
 ## Usage
@@ -56,6 +63,7 @@ pytest
 │   ├── sequence.py                 # VHHSequence with cached properties & fast mutation
 │   ├── humanness.py                # Humanness scoring (HumAnnotator)
 │   ├── stability.py                # Stability scoring with ESM-2 integration
+│   ├── nativeness.py               # AbNatiV nativeness scoring (optional)
 │   ├── developability.py           # PTM, clearance risk, surface hydrophobicity
 │   ├── orthogonal_scoring.py       # HSC, consensus scorers
 │   ├── mutation_engine.py          # Mutation ranking & library generation
@@ -92,6 +100,7 @@ This project relies on the following open-source libraries. If you use this tool
 | **ANARCI** | Dunbar, J. & Deane, C.M. (2016). ANARCI: antigen receptor numbering and receptor classification. *Bioinformatics*, 32(2), 298–300. doi:[10.1093/bioinformatics/btv552](https://doi.org/10.1093/bioinformatics/btv552) |
 | **HMMER** | Eddy, S.R. (2011). Accelerated profile HMM searches. *PLoS Comput Biol*, 7(10), e1002195. doi:[10.1371/journal.pcbi.1002195](https://doi.org/10.1371/journal.pcbi.1002195) |
 | **ESM-2** (fair-esm) | Lin, Z. *et al.* (2023). Evolutionary-scale prediction of atomic-level protein structure with a language model. *Science*, 379(6637), 1123–1130. doi:[10.1126/science.ade2574](https://doi.org/10.1126/science.ade2574) |
+| **AbNatiV** | Kenlay, H. *et al.* (2024). AbNatiV: VQ-VAE-based assessment of antibody and nanobody nativeness for hit selection, humanisation, and engineering. *Nature Machine Intelligence*, 6, 1–11. doi:[10.1038/s42256-023-00778-3](https://doi.org/10.1038/s42256-023-00778-3) |
 | **DNA Chisel** | Zulkower, V. & Rosser, S. (2020). DNA Chisel, a versatile sequence optimizer. *Bioinformatics*, 36(16), 4508–4509. doi:[10.1093/bioinformatics/btaa558](https://doi.org/10.1093/bioinformatics/btaa558) |
 | **python-codon-tables** | Edinburgh Genome Foundry. Codon usage tables for Python, sourced from the Kazusa database. [GitHub](https://github.com/Edinburgh-Genome-Foundry/python-codon-tables) |
 | **BioPython** | Cock, P.J.A. *et al.* (2009). Biopython: freely available Python tools for computational molecular biology. *Bioinformatics*, 25(11), 1422–1423. doi:[10.1093/bioinformatics/btp163](https://doi.org/10.1093/bioinformatics/btp163) |

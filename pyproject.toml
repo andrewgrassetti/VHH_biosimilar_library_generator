@@ -28,9 +28,15 @@ ml = [
     # torch and fair-esm are now core dependencies; this extra is kept only
     # so that existing ``pip install ".[ml]"`` commands do not fail.
 ]
+nativeness = [
+    "abnativ",
+]
 dev = [
     "pytest>=7.0",
     "ruff>=0.4",
+]
+all = [
+    "abnativ",
 ]
 
 [tool.pytest.ini_options]

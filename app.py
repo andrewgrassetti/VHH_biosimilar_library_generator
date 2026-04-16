@@ -1,6 +1,8 @@
 """Main Streamlit application for VHH Biosimilar Library Generator."""
 
 
+import logging
+
 import matplotlib
 import pandas as pd
 import streamlit as st
@@ -68,7 +70,16 @@ def load_scorers():
     hydro = SurfaceHydrophobicityScorer()
     hsc = HumanStringContentScorer()
     cons = ConsensusStabilityScorer()
-    return h, s, hydro, hsc, cons, esm_scorer
+    # Create AbNatiV nativeness scorer if the package is available
+    nativeness_scorer = None
+    try:
+        from vhh_library.nativeness import NativenessScorer
+        nativeness_scorer = NativenessScorer()
+    except ImportError:
+        pass
+    except Exception:
+        logging.getLogger(__name__).debug("AbNatiV scorer init failed", exc_info=True)
+    return h, s, hydro, hsc, cons, esm_scorer, nativeness_scorer
 
 
 def load_calibration_data() -> dict | None:
@@ -183,6 +194,14 @@ def sidebar():
         st.slider(
             "Surface hydrophobicity weight", 0.0, 1.0, 0.20, 0.05,
             disabled=not enable_hydrophobicity, key="w_hydrophobicity",
+        )
+        enable_nativeness = st.checkbox(
+            "Enable nativeness (AbNatiV)", value=False, key="enable_nativeness",
+            help="Optional – uses AbNatiV to score VHH nativeness",
+        )
+        st.slider(
+            "Nativeness weight", 0.0, 1.0, 0.20, 0.05,
+            disabled=not enable_nativeness, key="w_nativeness",
         )
 
         st.divider()
@@ -522,9 +541,14 @@ def tab_mutations(humanness_scorer, stability_scorer):
         enabled["surface_hydrophobicity"] = True
     else:
         enabled["surface_hydrophobicity"] = False
+    if st.session_state.get("enable_nativeness", False):
+        weights["nativeness"] = st.session_state.get("w_nativeness", 0.20)
+        enabled["nativeness"] = True
+    else:
+        enabled["nativeness"] = False
 
     scorers = load_scorers()
-    _, _, hydrophobicity_scorer, hsc_scorer, consensus_scorer, esm_scorer = scorers
+    _, _, hydrophobicity_scorer, hsc_scorer, consensus_scorer, esm_scorer, nativeness_scorer = scorers
 
     if st.button("Rank single mutations", type="primary", key="btn_rank"):
         engine = MutationEngine(
@@ -534,6 +558,7 @@ def tab_mutations(humanness_scorer, stability_scorer):
             hsc_scorer=hsc_scorer,
             consensus_scorer=consensus_scorer,
             esm_scorer=esm_scorer,
+            nativeness_scorer=nativeness_scorer if enabled.get("nativeness") else None,
             weights=weights,
             enabled_metrics=enabled,
         )
@@ -1311,7 +1336,8 @@ def tab_history():
 def main():
     init_state()
     scorers = load_scorers()
-    humanness_scorer, stability_scorer, hydrophobicity_scorer, hsc_scorer, consensus_scorer, esm_scorer = scorers
+    (humanness_scorer, stability_scorer, hydrophobicity_scorer,
+     hsc_scorer, consensus_scorer, esm_scorer, _nativeness_scorer) = scorers
     optimizer = CodonOptimizer()
     tag_manager = TagManager()
     viz = SequenceVisualizer()
