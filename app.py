@@ -26,12 +26,11 @@ from vhh_library.calibration import (
 from vhh_library.codon_optimizer import CodonOptimizer
 from vhh_library.components.sequence_selector import imgt_key_int_part, sequence_selector
 from vhh_library.developability import SurfaceHydrophobicityScorer
-from vhh_library.humanness import HumAnnotator
 from vhh_library.library_manager import LibraryManager
 from vhh_library.mutation_engine import MutationEngine
+from vhh_library.nativeness import NativenessScorer
 from vhh_library.orthogonal_scoring import (
     ConsensusStabilityScorer,
-    HumanStringContentScorer,
 )
 from vhh_library.sequence import IMGT_REGIONS, VHHSequence
 from vhh_library.stability import (
@@ -57,7 +56,6 @@ st.set_page_config(
 @st.cache_resource
 def load_scorers():
     """Cache heavy scorer initialization."""
-    h = HumAnnotator()
     # Create ESM-2 scorer if torch/esm are available, and pass to StabilityScorer
     esm_scorer = None
     if _esm2_pll_available():
@@ -68,18 +66,9 @@ def load_scorers():
             pass
     s = StabilityScorer(esm_scorer=esm_scorer)
     hydro = SurfaceHydrophobicityScorer()
-    hsc = HumanStringContentScorer()
     cons = ConsensusStabilityScorer()
-    # Create AbNatiV nativeness scorer if the package is available
-    nativeness_scorer = None
-    try:
-        from vhh_library.nativeness import NativenessScorer
-        nativeness_scorer = NativenessScorer()
-    except ImportError:
-        pass
-    except Exception:
-        logging.getLogger(__name__).debug("AbNatiV scorer init failed", exc_info=True)
-    return h, s, hydro, hsc, cons, esm_scorer, nativeness_scorer
+    nativeness_scorer = NativenessScorer()
+    return s, hydro, cons, esm_scorer, nativeness_scorer
 
 
 def load_calibration_data() -> dict | None:
@@ -94,10 +83,9 @@ def load_calibration_data() -> dict | None:
 def init_state():
     defaults = {
         "vhh_seq": None,
-        "humanness_scores": None,
         "stability_scores": None,
+        "nativeness_scores": None,
         "hydrophobicity_scores": None,
-        "orthogonal_humanness_scores": None,
         "orthogonal_stability_scores": None,
         "ranked_mutations": None,
         "library": None,
@@ -179,29 +167,19 @@ def sidebar():
         st.subheader("Scoring Weights")
         enable_stability = st.checkbox("Enable stability", value=True, key="enable_stability")
         st.slider(
-            "Stability weight", 0.0, 1.0, 0.80, 0.05,
+            "Stability weight", 0.0, 1.0, 0.70, 0.05,
             disabled=not enable_stability, key="w_stability",
-        )
-        enable_humanness = st.checkbox("Enable humanness", value=False, key="enable_humanness",
-                                       help="Optional – uses humanness as an additional scoring axis")
-        st.slider(
-            "Humanness weight", 0.0, 1.0, 0.0, 0.05,
-            disabled=not enable_humanness, key="w_humanness",
         )
         enable_hydrophobicity = st.checkbox(
             "Enable surface hydrophobicity", value=True, key="enable_hydrophobicity",
         )
         st.slider(
-            "Surface hydrophobicity weight", 0.0, 1.0, 0.20, 0.05,
+            "Surface hydrophobicity weight", 0.0, 1.0, 0.00, 0.05,
             disabled=not enable_hydrophobicity, key="w_hydrophobicity",
         )
-        enable_nativeness = st.checkbox(
-            "Enable nativeness (AbNatiV)", value=False, key="enable_nativeness",
-            help="Optional – uses AbNatiV to score VHH nativeness",
-        )
         st.slider(
-            "Nativeness weight", 0.0, 1.0, 0.20, 0.05,
-            disabled=not enable_nativeness, key="w_nativeness",
+            "Nativeness weight (AbNatiV)", 0.0, 1.0, 0.30, 0.05,
+            key="w_nativeness",
         )
 
         st.divider()
@@ -345,8 +323,8 @@ def sidebar():
 # Tab 1 – Input & Analysis
 # ---------------------------------------------------------------------------
 
-def tab_input(humanness_scorer, stability_scorer, hydrophobicity_scorer,
-              hsc_scorer, consensus_scorer, viz):
+def tab_input(stability_scorer, nativeness_scorer, hydrophobicity_scorer,
+              consensus_scorer, viz):
     st.header("🔬 Input & Analysis")
 
     raw_seq = st.text_area(
@@ -378,10 +356,9 @@ def tab_input(humanness_scorer, stability_scorer, hydrophobicity_scorer,
         st.session_state["vhh_seq"] = vhh
 
         with st.spinner("Scoring…"):
-            st.session_state["humanness_scores"] = humanness_scorer.score(vhh)
             st.session_state["stability_scores"] = stability_scorer.score(vhh)
+            st.session_state["nativeness_scores"] = nativeness_scorer.score(vhh)
             st.session_state["hydrophobicity_scores"] = hydrophobicity_scorer.score(vhh)
-            st.session_state["orthogonal_humanness_scores"] = hsc_scorer.score(vhh)
             st.session_state["orthogonal_stability_scores"] = consensus_scorer.score(vhh)
 
     # -- Display results --
@@ -390,10 +367,9 @@ def tab_input(humanness_scorer, stability_scorer, hydrophobicity_scorer,
         st.info("Enter a VHH sequence above and click **Analyse sequence**.")
         return
 
-    h_scores = st.session_state["humanness_scores"]
     s_scores = st.session_state["stability_scores"]
+    nat_scores = st.session_state["nativeness_scores"]
     hy_scores = st.session_state["hydrophobicity_scores"]
-    ort_h = st.session_state["orthogonal_humanness_scores"]
     ort_s = st.session_state["orthogonal_stability_scores"]
 
     st.success(f"Sequence accepted – {vhh.length} residues")
@@ -402,9 +378,10 @@ def tab_input(humanness_scorer, stability_scorer, hydrophobicity_scorer,
     st.subheader("Composite Scores")
     col1, col2, col3 = st.columns(3)
     with col1:
-        st.markdown(viz.render_score_bar(h_scores["composite_score"], "Humanness", "#42A5F5"), unsafe_allow_html=True)
-    with col2:
         st.markdown(viz.render_score_bar(s_scores["composite_score"], "Stability", "#66BB6A"), unsafe_allow_html=True)
+    with col2:
+        nat_composite = nat_scores["composite_score"] if nat_scores else 0.0
+        st.markdown(viz.render_score_bar(nat_composite, "Nativeness (AbNatiV)", "#AB47BC"), unsafe_allow_html=True)
     with col3:
         hydro_bar = viz.render_score_bar(
             hy_scores["composite_score"], "Surface Hydrophobicity", "#FFA726",
@@ -413,26 +390,13 @@ def tab_input(humanness_scorer, stability_scorer, hydrophobicity_scorer,
 
     # Orthogonal scores
     st.subheader("Orthogonal Scores")
-    oc1, oc2 = st.columns(2)
-    with oc1:
-        st.metric("Human String Content", f"{ort_h['composite_score']:.3f}")
-    with oc2:
-        st.metric("Consensus Stability", f"{ort_s['composite_score']:.3f}")
+    st.metric("Consensus Stability", f"{ort_s['composite_score']:.3f}")
 
     # Region track
     st.subheader("IMGT Region Map")
     st.markdown(viz.render_region_track(vhh), unsafe_allow_html=True)
 
     # Detailed breakdowns
-    with st.expander("Humanness Details"):
-        st.write(f"**Best germline:** {h_scores['best_germline']}")
-        st.write(f"**Germline identity:** {h_scores['germline_identity']:.3f}")
-        if h_scores.get("position_scores"):
-            pos_df = pd.DataFrame(
-                [{"IMGT position": k, "Score": v} for k, v in sorted(h_scores["position_scores"].items())],
-            )
-            st.dataframe(pos_df, use_container_width=True, hide_index=True)
-
     with st.expander("Stability Details"):
         detail_cols = [
             ("pI", "pI"), ("disulfide_score", "Disulfide"),
@@ -465,7 +429,7 @@ def tab_input(humanness_scorer, stability_scorer, hydrophobicity_scorer,
 # Tab 2 – Mutation Selection
 # ---------------------------------------------------------------------------
 
-def tab_mutations(humanness_scorer, stability_scorer):
+def tab_mutations(stability_scorer):
     st.header("🎯 Mutation Selection")
 
     vhh = st.session_state.get("vhh_seq")
@@ -526,39 +490,29 @@ def tab_mutations(humanness_scorer, stability_scorer):
 
     weights = {}
     enabled = {}
-    if st.session_state.get("enable_humanness", False):
-        weights["humanness"] = st.session_state.get("w_humanness", 0.0)
-        enabled["humanness"] = True
-    else:
-        enabled["humanness"] = False
     if st.session_state.get("enable_stability", True):
-        weights["stability"] = st.session_state.get("w_stability", 0.80)
+        weights["stability"] = st.session_state.get("w_stability", 0.70)
         enabled["stability"] = True
     else:
         enabled["stability"] = False
     if st.session_state.get("enable_hydrophobicity", True):
-        weights["surface_hydrophobicity"] = st.session_state.get("w_hydrophobicity", 0.20)
+        weights["surface_hydrophobicity"] = st.session_state.get("w_hydrophobicity", 0.00)
         enabled["surface_hydrophobicity"] = True
     else:
         enabled["surface_hydrophobicity"] = False
-    if st.session_state.get("enable_nativeness", False):
-        weights["nativeness"] = st.session_state.get("w_nativeness", 0.20)
-        enabled["nativeness"] = True
-    else:
-        enabled["nativeness"] = False
+    weights["nativeness"] = st.session_state.get("w_nativeness", 0.30)
+    enabled["nativeness"] = True
 
     scorers = load_scorers()
-    _, _, hydrophobicity_scorer, hsc_scorer, consensus_scorer, esm_scorer, nativeness_scorer = scorers
+    _, hydrophobicity_scorer, consensus_scorer, esm_scorer, nativeness_scorer = scorers
 
     if st.button("Rank single mutations", type="primary", key="btn_rank"):
         engine = MutationEngine(
-            humanness_scorer if enabled.get("humanness") else None,
             stability_scorer,
+            nativeness_scorer,
             hydrophobicity_scorer=hydrophobicity_scorer if enabled.get("surface_hydrophobicity") else None,
-            hsc_scorer=hsc_scorer,
             consensus_scorer=consensus_scorer,
             esm_scorer=esm_scorer,
-            nativeness_scorer=nativeness_scorer if enabled.get("nativeness") else None,
             weights=weights,
             enabled_metrics=enabled,
         )
@@ -662,7 +616,7 @@ def tab_library(viz):
     # -- Distribution plots --
     st.subheader("Score Distributions")
     score_cols = [c for c in ["combined_score", "stability_score",
-                               "surface_hydrophobicity_score", "humanness_score"] if c in library.columns]
+                               "nativeness_score", "surface_hydrophobicity_score"] if c in library.columns]
     if score_cols:
         fig, axes = plt.subplots(1, len(score_cols), figsize=(4 * len(score_cols), 3))
         if len(score_cols) == 1:
@@ -677,16 +631,16 @@ def tab_library(viz):
         plt.close(fig)
 
     # -- Correlation plot --
-    if "humanness_score" in library.columns and "stability_score" in library.columns:
-        st.subheader("Humanness vs Stability Correlation")
-        h_vals = library["humanness_score"].dropna()
+    if "nativeness_score" in library.columns and "stability_score" in library.columns:
+        st.subheader("Nativeness vs Stability Correlation")
+        n_vals = library["nativeness_score"].dropna()
         s_vals = library["stability_score"].dropna()
-        common_idx = h_vals.index.intersection(s_vals.index)
+        common_idx = n_vals.index.intersection(s_vals.index)
         if len(common_idx) > 2:
-            rho, pval = spearmanr(h_vals.loc[common_idx], s_vals.loc[common_idx])
+            rho, pval = spearmanr(n_vals.loc[common_idx], s_vals.loc[common_idx])
             fig2, ax2 = plt.subplots(figsize=(5, 4))
-            ax2.scatter(h_vals.loc[common_idx], s_vals.loc[common_idx], alpha=0.4, s=10)
-            ax2.set_xlabel("Humanness Score")
+            ax2.scatter(n_vals.loc[common_idx], s_vals.loc[common_idx], alpha=0.4, s=10)
+            ax2.set_xlabel("Nativeness Score")
             ax2.set_ylabel("Stability Score")
             ax2.set_title(f"Spearman ρ = {rho:.3f} (p = {pval:.2e})")
             plt.tight_layout()
@@ -1275,7 +1229,7 @@ def tab_history():
     st.subheader("Save Current Session")
     if st.button("Save session", key="btn_save_session"):
         data: dict = {}
-        for key in ["vhh_seq", "humanness_scores", "stability_scores",
+        for key in ["vhh_seq", "stability_scores", "nativeness_scores",
                      "hydrophobicity_scores", "ranked_mutations", "library",
                      "constructs"]:
             val = st.session_state.get(key)
@@ -1315,7 +1269,7 @@ def tab_history():
                         if key in loaded and isinstance(loaded[key], list):
                             st.session_state[key] = pd.DataFrame(loaded[key])
                     # Restore dicts
-                    for key in ["humanness_scores", "stability_scores",
+                    for key in ["stability_scores", "nativeness_scores",
                                 "hydrophobicity_scores", "constructs"]:
                         if key in loaded:
                             st.session_state[key] = loaded[key]
@@ -1336,8 +1290,8 @@ def tab_history():
 def main():
     init_state()
     scorers = load_scorers()
-    (humanness_scorer, stability_scorer, hydrophobicity_scorer,
-     hsc_scorer, consensus_scorer, esm_scorer, _nativeness_scorer) = scorers
+    (stability_scorer, hydrophobicity_scorer,
+     consensus_scorer, esm_scorer, nativeness_scorer) = scorers
     optimizer = CodonOptimizer()
     tag_manager = TagManager()
     viz = SequenceVisualizer()
@@ -1354,10 +1308,10 @@ def main():
         "📁 Session History",
     ])
     with tabs[0]:
-        tab_input(humanness_scorer, stability_scorer, hydrophobicity_scorer,
-                  hsc_scorer, consensus_scorer, viz)
+        tab_input(stability_scorer, nativeness_scorer, hydrophobicity_scorer,
+                  consensus_scorer, viz)
     with tabs[1]:
-        tab_mutations(humanness_scorer, stability_scorer)
+        tab_mutations(stability_scorer)
     with tabs[2]:
         tab_library(viz)
     with tabs[3]:

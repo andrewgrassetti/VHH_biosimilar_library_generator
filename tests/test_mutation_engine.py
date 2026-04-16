@@ -7,7 +7,6 @@ import time
 import pandas as pd
 import pytest
 
-from vhh_library.humanness import HumAnnotator
 from vhh_library.mutation_engine import (
     IterativeProgress,
     MutationEngine,
@@ -26,16 +25,32 @@ SAMPLE_VHH = (
 )
 
 
+class _MockNativenessScorer:
+    """Deterministic mock that follows the NativenessScorer interface.
+
+    Uses sequence length modulo to produce repeatable scores in [0.5, 0.9].
+    """
+
+    _SCORE_MODULO = 20
+
+    def score(self, vhh: VHHSequence) -> dict:
+        raw = (len(vhh.sequence) % self._SCORE_MODULO) / self._SCORE_MODULO
+        return {"composite_score": 0.5 + raw * 0.4}
+
+    def predict_mutation_effect(
+        self, vhh: VHHSequence, position: int | str, new_aa: str
+    ) -> float:
+        # Return a small deterministic delta
+        return 0.02 if new_aa in "AGILV" else -0.01
+
+
 @pytest.fixture(scope="module")
 def engine() -> MutationEngine:
-    """Engine with humanness scorer (legacy path)."""
-    return MutationEngine(HumAnnotator(), StabilityScorer())
-
-
-@pytest.fixture(scope="module")
-def stability_engine() -> MutationEngine:
-    """Engine without humanness scorer (stability-driven path)."""
-    return MutationEngine(stability_scorer=StabilityScorer())
+    """Engine with mock nativeness scorer (default produceability path)."""
+    return MutationEngine(
+        stability_scorer=StabilityScorer(),
+        nativeness_scorer=_MockNativenessScorer(),
+    )
 
 
 @pytest.fixture(scope="module")
@@ -46,11 +61,6 @@ def vhh() -> VHHSequence:
 @pytest.fixture(scope="module")
 def ranked(engine: MutationEngine, vhh: VHHSequence) -> pd.DataFrame:
     return engine.rank_single_mutations(vhh)
-
-
-@pytest.fixture(scope="module")
-def stability_ranked(stability_engine: MutationEngine, vhh: VHHSequence) -> pd.DataFrame:
-    return stability_engine.rank_single_mutations(vhh)
 
 
 class TestRankSingleMutations:
@@ -65,57 +75,48 @@ class TestRankSingleMutations:
         if not df.empty:
             assert "C" not in df["suggested_aa"].values
 
-    def test_rank_single_mutations_has_humanness_deltas(
+    def test_rank_single_mutations_has_nativeness_deltas(
         self, ranked: pd.DataFrame
     ) -> None:
-        """With humanness scorer, delta_humanness should have non-zero values."""
+        """With nativeness scorer, delta_nativeness should have non-zero values."""
         if not ranked.empty:
-            assert "delta_humanness" in ranked.columns
-            assert ranked["delta_humanness"].abs().sum() > 0
+            assert "delta_nativeness" in ranked.columns
+            assert ranked["delta_nativeness"].abs().sum() > 0
 
-
-class TestStabilityDrivenRanking:
-    """Tests for stability-driven candidate generation (no humanness scorer)."""
-
-    def test_stability_ranked_has_results(self, stability_ranked: pd.DataFrame) -> None:
-        assert not stability_ranked.empty
-        assert "position" in stability_ranked.columns
-        assert "combined_score" in stability_ranked.columns
-        assert "delta_stability" in stability_ranked.columns
-
-    def test_stability_ranked_no_cdrs(
-        self, stability_ranked: pd.DataFrame, vhh: VHHSequence
+    def test_rank_single_mutations_has_stability_deltas(
+        self, ranked: pd.DataFrame
     ) -> None:
-        """Stability-driven candidates should not include CDR positions."""
+        if not ranked.empty:
+            assert "delta_stability" in ranked.columns
+
+    def test_ranked_no_cdrs(
+        self, ranked: pd.DataFrame, vhh: VHHSequence
+    ) -> None:
+        """Candidates should not include CDR positions."""
         cdr_positions = vhh.cdr_positions
-        for _, row in stability_ranked.iterrows():
+        for _, row in ranked.iterrows():
             assert str(row["imgt_pos"]) not in cdr_positions
 
-    def test_stability_ranked_excluded_target_aas(
-        self, stability_engine: MutationEngine, vhh: VHHSequence
+    def test_ranked_excluded_target_aas(
+        self, engine: MutationEngine, vhh: VHHSequence
     ) -> None:
-        df = stability_engine.rank_single_mutations(vhh, excluded_target_aas={"C", "M"})
+        df = engine.rank_single_mutations(vhh, excluded_target_aas={"C", "M"})
         if not df.empty:
             assert "C" not in df["suggested_aa"].values
             assert "M" not in df["suggested_aa"].values
 
-    def test_stability_ranked_multiple_per_position(
-        self, stability_engine: MutationEngine, vhh: VHHSequence
+    def test_ranked_multiple_per_position(
+        self, engine: MutationEngine, vhh: VHHSequence
     ) -> None:
         """Stability-driven scan returns multiple AAs per position when max_per_position > 1."""
-        ranked = stability_engine.rank_single_mutations(vhh, max_per_position=3)
+        ranked = engine.rank_single_mutations(vhh, max_per_position=3)
         if not ranked.empty:
             pos_counts = ranked.groupby("imgt_pos").size()
             assert pos_counts.max() > 1
 
-    def test_stability_ranked_reason(self, stability_ranked: pd.DataFrame) -> None:
-        if not stability_ranked.empty:
-            assert all(r == "Stability-driven scan" for r in stability_ranked["reason"])
-
-    def test_humanness_delta_is_zero(self, stability_ranked: pd.DataFrame) -> None:
-        """Without humanness scorer, delta_humanness should be 0."""
-        if not stability_ranked.empty:
-            assert all(stability_ranked["delta_humanness"] == 0.0)
+    def test_ranked_reason(self, ranked: pd.DataFrame) -> None:
+        if not ranked.empty:
+            assert all(r == "Stability-driven scan" for r in ranked["reason"])
 
 
 class TestApplyMutations:
@@ -136,18 +137,19 @@ class TestGenerateLibrary:
         assert isinstance(lib, pd.DataFrame)
         assert "n_mutations" in lib.columns
 
-    def test_generate_library_stability_only(
-        self, stability_engine: MutationEngine, vhh: VHHSequence, stability_ranked: pd.DataFrame
+    def test_generate_library_has_nativeness(
+        self, engine: MutationEngine, vhh: VHHSequence, ranked: pd.DataFrame
     ) -> None:
-        """Library generation works end-to-end with stability-only scoring."""
-        top5 = stability_ranked.head(5)
+        """Library generation includes nativeness scoring."""
+        top5 = ranked.head(5)
         if top5.empty:
             pytest.skip("No mutations ranked")
-        lib = stability_engine.generate_library(vhh, top5, n_mutations=2)
+        lib = engine.generate_library(vhh, top5, n_mutations=2)
         assert isinstance(lib, pd.DataFrame)
         assert "n_mutations" in lib.columns
         if not lib.empty:
             assert "stability_score" in lib.columns
+            assert "nativeness_score" in lib.columns
 
     def test_generate_library_min_mutations(
         self, engine: MutationEngine, vhh: VHHSequence, ranked: pd.DataFrame
@@ -191,8 +193,19 @@ class TestGenerateLibrary:
             pytest.skip("No mutations ranked")
         lib = engine.generate_library(vhh, top5, n_mutations=2)
         if not lib.empty:
-            assert "orthogonal_humanness_score" in lib.columns
             assert "orthogonal_stability_score" in lib.columns
+
+    def test_generate_library_no_humanness_columns(
+        self, engine: MutationEngine, vhh: VHHSequence, ranked: pd.DataFrame
+    ) -> None:
+        """Library output should not contain humanness columns."""
+        top5 = ranked.head(5)
+        if top5.empty:
+            pytest.skip("No mutations ranked")
+        lib = engine.generate_library(vhh, top5, n_mutations=2)
+        if not lib.empty:
+            assert "humanness_score" not in lib.columns
+            assert "orthogonal_humanness_score" not in lib.columns
 
     def test_generate_library_strategy_random(
         self, engine: MutationEngine, vhh: VHHSequence, ranked: pd.DataFrame
@@ -224,22 +237,32 @@ class TestWeightsAndMetrics:
         assert abs(total - 1.0) < 1e-6
 
     def test_stability_is_heaviest_weight(self) -> None:
-        eng = MutationEngine(stability_scorer=StabilityScorer())
+        eng = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=_MockNativenessScorer(),
+        )
         assert eng._weights["stability"] >= max(
             v for k, v in eng._weights.items() if k != "stability"
         )
 
-    def test_stability_only_engine_weights(self) -> None:
-        """Engine with no humanness scorer should have humanness weight 0."""
-        eng = MutationEngine(stability_scorer=StabilityScorer())
-        assert eng._weights["humanness"] == 0.0
-        assert eng._enabled_metrics["humanness"] is False
+    def test_nativeness_always_enabled(self) -> None:
+        """Engine always has nativeness enabled."""
+        eng = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=_MockNativenessScorer(),
+        )
+        assert eng._enabled_metrics["nativeness"] is True
+        assert eng._weights["nativeness"] > 0.0
 
-    def test_humanness_engine_weights(self) -> None:
-        """Engine with humanness scorer should have non-zero humanness weight."""
-        eng = MutationEngine(HumAnnotator(), StabilityScorer())
-        assert eng._weights["humanness"] > 0.0
-        assert eng._enabled_metrics["humanness"] is True
+    def test_no_humanness_in_metrics(self) -> None:
+        """Humanness should not appear in metric names or weights."""
+        eng = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=_MockNativenessScorer(),
+        )
+        assert "humanness" not in MutationEngine.METRIC_NAMES
+        assert "humanness" not in eng._weights
+        assert "humanness" not in eng._enabled_metrics
 
 
 class TestPTMLiability:
@@ -256,40 +279,40 @@ class TestPTMLiability:
 class TestMultiCandidatePerPosition:
     """Tests for multi-option per position feature."""
 
-    def test_humanness_multi_candidates(
+    def test_multi_candidates(
         self, engine: MutationEngine, vhh: VHHSequence
     ) -> None:
-        """Humanness-based ranking should return multiple AAs per position when requested."""
+        """Ranking should return multiple AAs per position when requested."""
         ranked = engine.rank_single_mutations(vhh, max_per_position=3)
         if not ranked.empty:
             pos_counts = ranked.groupby("imgt_pos").size()
             # At least some positions should have more than 1 candidate
             assert pos_counts.max() >= 1  # at least 1 always
 
-    def test_stability_multi_candidates_limited(
-        self, stability_engine: MutationEngine, vhh: VHHSequence
+    def test_multi_candidates_limited(
+        self, engine: MutationEngine, vhh: VHHSequence
     ) -> None:
-        """Stability-driven ranking should limit to max_per_position."""
-        ranked_limited = stability_engine.rank_single_mutations(vhh, max_per_position=2)
+        """Ranking should limit to max_per_position."""
+        ranked_limited = engine.rank_single_mutations(vhh, max_per_position=2)
         if not ranked_limited.empty:
             pos_counts = ranked_limited.groupby("imgt_pos").size()
             assert pos_counts.max() <= 2
 
     def test_single_candidate_per_position(
-        self, stability_engine: MutationEngine, vhh: VHHSequence
+        self, engine: MutationEngine, vhh: VHHSequence
     ) -> None:
         """max_per_position=1 should give at most 1 candidate per position."""
-        ranked = stability_engine.rank_single_mutations(vhh, max_per_position=1)
+        ranked = engine.rank_single_mutations(vhh, max_per_position=1)
         if not ranked.empty:
             pos_counts = ranked.groupby("imgt_pos").size()
             assert pos_counts.max() == 1
 
     def test_library_multi_options_different_aas_across_variants(
-        self, stability_engine: MutationEngine, vhh: VHHSequence
+        self, engine: MutationEngine, vhh: VHHSequence
     ) -> None:
         """Library with multi-option positions should have variants where the same
         position has different AA choices across different variants."""
-        ranked = stability_engine.rank_single_mutations(vhh, max_per_position=3)
+        ranked = engine.rank_single_mutations(vhh, max_per_position=3)
         if ranked.empty:
             pytest.skip("No mutations ranked")
 
@@ -300,7 +323,7 @@ class TestMultiCandidatePerPosition:
             pytest.skip("No positions with multiple candidates")
 
         top = ranked.head(15)
-        lib = stability_engine.generate_library(vhh, top, n_mutations=2, max_variants=50)
+        lib = engine.generate_library(vhh, top, n_mutations=2, max_variants=50)
         if lib.empty:
             pytest.skip("Empty library")
 
@@ -317,15 +340,15 @@ class TestMultiCandidatePerPosition:
         )
 
     def test_no_variant_has_duplicate_position(
-        self, stability_engine: MutationEngine, vhh: VHHSequence
+        self, engine: MutationEngine, vhh: VHHSequence
     ) -> None:
         """No single variant should have the same position mutated twice."""
-        ranked = stability_engine.rank_single_mutations(vhh, max_per_position=3)
+        ranked = engine.rank_single_mutations(vhh, max_per_position=3)
         if ranked.empty:
             pytest.skip("No mutations ranked")
 
         top = ranked.head(15)
-        lib = stability_engine.generate_library(vhh, top, n_mutations=3, max_variants=50)
+        lib = engine.generate_library(vhh, top, n_mutations=3, max_variants=50)
         if lib.empty:
             pytest.skip("Empty library")
 
@@ -389,13 +412,13 @@ class TestEvolutionaryIterativeStrategy:
     """Tests for the redesigned multi-phase iterative strategy."""
 
     def test_iterative_converges(
-        self, stability_engine: MutationEngine, vhh: VHHSequence, stability_ranked: pd.DataFrame
+        self, engine: MutationEngine, vhh: VHHSequence, ranked: pd.DataFrame
     ) -> None:
         """Final round scores should be >= seed round scores (convergence)."""
-        top10 = stability_ranked.head(10)
+        top10 = ranked.head(10)
         if top10.empty:
             pytest.skip("No mutations ranked")
-        lib = stability_engine.generate_library(
+        lib = engine.generate_library(
             vhh, top10, n_mutations=3, strategy="iterative",
             max_variants=100, max_rounds=6,
         )
@@ -408,13 +431,13 @@ class TestEvolutionaryIterativeStrategy:
         assert top_avg > 0.0
 
     def test_iterative_produces_diverse_variants(
-        self, stability_engine: MutationEngine, vhh: VHHSequence, stability_ranked: pd.DataFrame
+        self, engine: MutationEngine, vhh: VHHSequence, ranked: pd.DataFrame
     ) -> None:
         """Iterative strategy should produce diverse (not all identical) variants."""
-        top10 = stability_ranked.head(10)
+        top10 = ranked.head(10)
         if top10.empty:
             pytest.skip("No mutations ranked")
-        lib = stability_engine.generate_library(
+        lib = engine.generate_library(
             vhh, top10, n_mutations=3, strategy="iterative",
             max_variants=50, max_rounds=4,
         )
@@ -426,10 +449,10 @@ class TestEvolutionaryIterativeStrategy:
         assert unique_muts > 1, "All mutation sets are identical"
 
     def test_iterative_with_progress_callback(
-        self, stability_engine: MutationEngine, vhh: VHHSequence, stability_ranked: pd.DataFrame
+        self, engine: MutationEngine, vhh: VHHSequence, ranked: pd.DataFrame
     ) -> None:
         """Progress callback should be invoked with valid IterativeProgress."""
-        top5 = stability_ranked.head(5)
+        top5 = ranked.head(5)
         if top5.empty:
             pytest.skip("No mutations ranked")
 
@@ -438,7 +461,7 @@ class TestEvolutionaryIterativeStrategy:
         def _on_progress(prog: IterativeProgress) -> None:
             progress_events.append(prog)
 
-        lib = stability_engine.generate_library(
+        lib = engine.generate_library(
             vhh, top5, n_mutations=2, strategy="iterative",
             max_variants=30, max_rounds=4,
             progress_callback=_on_progress,
@@ -455,14 +478,14 @@ class TestEvolutionaryIterativeStrategy:
             assert p.population_size >= 0
 
     def test_iterative_benchmark_under_5_min(
-        self, stability_engine: MutationEngine, vhh: VHHSequence, stability_ranked: pd.DataFrame
+        self, engine: MutationEngine, vhh: VHHSequence, ranked: pd.DataFrame
     ) -> None:
         """For a 10-mutation search space, strategy should complete in <5 minutes on CPU."""
-        top10 = stability_ranked.head(10)
+        top10 = ranked.head(10)
         if top10.empty:
             pytest.skip("No mutations ranked")
         start = time.time()
-        lib = stability_engine.generate_library(
+        lib = engine.generate_library(
             vhh, top10, n_mutations=10, strategy="iterative",
             max_variants=200, max_rounds=6,
         )
@@ -585,36 +608,11 @@ class TestAnchorIdentification:
 # ---------------------------------------------------------------------------
 
 
-class _MockNativenessScorer:
-    """Deterministic mock that follows the NativenessScorer interface.
-
-    Uses sequence length modulo to produce repeatable scores in [0.5, 0.9].
-    """
-
-    _SCORE_MODULO = 20
-
-    def score(self, vhh: VHHSequence) -> dict:
-        raw = (len(vhh.sequence) % self._SCORE_MODULO) / self._SCORE_MODULO
-        return {"composite_score": 0.5 + raw * 0.4}
-
-    def predict_mutation_effect(
-        self, vhh: VHHSequence, position: int | str, new_aa: str
-    ) -> float:
-        # Return a small deterministic delta
-        return 0.02 if new_aa in "AGILV" else -0.01
-
-
 class TestNativenessIntegration:
     """Tests for nativeness integration in MutationEngine."""
 
-    def test_no_nativeness_scorer_backward_compat(self) -> None:
-        """Without nativeness_scorer, nativeness is disabled with weight 0.0."""
-        engine = MutationEngine(stability_scorer=StabilityScorer())
-        assert engine._enabled_metrics["nativeness"] is False
-        assert engine._weights["nativeness"] == 0.0
-
-    def test_nativeness_scorer_enabled(self) -> None:
-        """With a nativeness scorer, nativeness is enabled with weight > 0."""
+    def test_nativeness_always_enabled(self) -> None:
+        """Nativeness is always enabled with default scorer."""
         engine = MutationEngine(
             stability_scorer=StabilityScorer(),
             nativeness_scorer=_MockNativenessScorer(),
@@ -639,15 +637,6 @@ class TestNativenessIntegration:
             # With mock scorer enabled, some delta values should be non-zero
             assert ranked["delta_nativeness"].abs().sum() > 0
 
-    def test_rank_single_mutations_delta_nativeness_zero_when_disabled(self) -> None:
-        """Without nativeness scorer, delta_nativeness should be 0."""
-        engine = MutationEngine(stability_scorer=StabilityScorer())
-        vhh = VHHSequence(SAMPLE_VHH)
-        ranked = engine.rank_single_mutations(vhh)
-        assert "delta_nativeness" in ranked.columns
-        if not ranked.empty:
-            assert all(ranked["delta_nativeness"] == 0.0)
-
     def test_build_variant_row_has_nativeness_score(self) -> None:
         """_build_variant_row output includes nativeness_score."""
         mock_scorer = _MockNativenessScorer()
@@ -663,48 +652,34 @@ class TestNativenessIntegration:
         if not lib.empty:
             assert "nativeness_score" in lib.columns
 
-    def test_combined_score_changes_with_nativeness(self) -> None:
-        """Combined score differs when nativeness is enabled vs disabled."""
+    def test_combined_score_includes_nativeness(self) -> None:
+        """Combined score includes nativeness contribution."""
         vhh = VHHSequence(SAMPLE_VHH)
 
-        engine_without = MutationEngine(stability_scorer=StabilityScorer())
-        ranked_without = engine_without.rank_single_mutations(vhh)
-
         mock_scorer = _MockNativenessScorer()
-        engine_with = MutationEngine(
+        engine = MutationEngine(
             stability_scorer=StabilityScorer(),
             nativeness_scorer=mock_scorer,
         )
-        ranked_with = engine_with.rank_single_mutations(vhh)
+        ranked = engine.rank_single_mutations(vhh)
 
-        if ranked_without.empty or ranked_with.empty:
+        if ranked.empty:
             pytest.skip("No mutations to compare")
 
-        # The combined scores should differ because nativeness contributes
-        scores_without = set(ranked_without["combined_score"].round(6))
-        scores_with = set(ranked_with["combined_score"].round(6))
-        assert scores_without != scores_with
-
-    def test_stability_only_identical_without_nativeness(self) -> None:
-        """Stability-only mode works identically when nativeness is not provided."""
-        vhh = VHHSequence(SAMPLE_VHH)
-
-        engine1 = MutationEngine(stability_scorer=StabilityScorer())
-        ranked1 = engine1.rank_single_mutations(vhh)
-
-        engine2 = MutationEngine(stability_scorer=StabilityScorer())
-        ranked2 = engine2.rank_single_mutations(vhh)
-
-        if ranked1.empty or ranked2.empty:
-            pytest.skip("No mutations ranked")
-
-        # Same engine config → identical results
-        assert list(ranked1["combined_score"]) == list(ranked2["combined_score"])
+        # The combined scores should include nativeness (non-zero weight)
+        assert engine._weights["nativeness"] > 0.0
+        assert engine._enabled_metrics["nativeness"] is True
 
     def test_empty_library_df_has_nativeness_score(self) -> None:
         """_empty_library_df includes nativeness_score column."""
         df = MutationEngine._empty_library_df()
         assert "nativeness_score" in df.columns
+
+    def test_empty_library_df_no_humanness(self) -> None:
+        """_empty_library_df does not include humanness columns."""
+        df = MutationEngine._empty_library_df()
+        assert "humanness_score" not in df.columns
+        assert "orthogonal_humanness_score" not in df.columns
 
     def test_generate_library_with_nativeness(self) -> None:
         """Library generation works with nativeness scorer enabled."""
@@ -722,3 +697,43 @@ class TestNativenessIntegration:
         if not lib.empty:
             assert "nativeness_score" in lib.columns
             assert "stability_score" in lib.columns
+
+
+class TestCombinedRanking:
+    """Tests for the combined scoring/ranking behavior."""
+
+    def test_combined_score_is_weighted_sum(self) -> None:
+        """Combined score should be a normalized weighted sum of active metrics."""
+        mock_scorer = _MockNativenessScorer()
+        engine = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=mock_scorer,
+            weights={"stability": 0.7, "nativeness": 0.3},
+        )
+        # Active weights should sum to 1.0
+        active = engine._active_weights()
+        assert abs(sum(active.values()) - 1.0) < 1e-6
+
+    def test_custom_weight_override(self) -> None:
+        """Custom weights should override defaults."""
+        mock_scorer = _MockNativenessScorer()
+        engine = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=mock_scorer,
+            weights={"stability": 0.5, "nativeness": 0.5},
+        )
+        assert engine._weights["stability"] == 0.5
+        assert engine._weights["nativeness"] == 0.5
+
+    def test_ranking_reflects_composite(self) -> None:
+        """Ranked mutations should be sorted by combined_score descending."""
+        mock_scorer = _MockNativenessScorer()
+        engine = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=mock_scorer,
+        )
+        vhh = VHHSequence(SAMPLE_VHH)
+        ranked = engine.rank_single_mutations(vhh)
+        if len(ranked) >= 2:
+            scores = ranked["combined_score"].tolist()
+            assert scores == sorted(scores, reverse=True)

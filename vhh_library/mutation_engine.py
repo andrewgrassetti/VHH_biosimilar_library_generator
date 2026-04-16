@@ -14,9 +14,9 @@ from typing import TYPE_CHECKING, Callable, Optional
 import pandas as pd
 
 from vhh_library.developability import SurfaceHydrophobicityScorer
+from vhh_library.nativeness import NativenessScorer
 from vhh_library.orthogonal_scoring import (
     ConsensusStabilityScorer,
-    HumanStringContentScorer,
 )
 from vhh_library.sequence import VHHSequence
 from vhh_library.stability import StabilityScorer
@@ -24,8 +24,6 @@ from vhh_library.utils import AMINO_ACIDS
 
 if TYPE_CHECKING:
     from vhh_library.esm_scorer import ESMStabilityScorer
-    from vhh_library.humanness import HumAnnotator
-    from vhh_library.nativeness import NativenessScorer
 
 logger = logging.getLogger(__name__)
 
@@ -266,50 +264,42 @@ def _compute_epistasis(
 class MutationEngine:
     """Generate, score and rank VHH variant libraries."""
 
-    METRIC_NAMES = ("humanness", "stability", "surface_hydrophobicity", "nativeness")
+    METRIC_NAMES = ("stability", "surface_hydrophobicity", "nativeness")
 
     def __init__(
         self,
-        humanness_scorer: "HumAnnotator | None" = None,
         stability_scorer: StabilityScorer | None = None,
+        nativeness_scorer: NativenessScorer | None = None,
         *,
         hydrophobicity_scorer: Optional[SurfaceHydrophobicityScorer] = None,
-        hsc_scorer: Optional[HumanStringContentScorer] = None,
         consensus_scorer: Optional[ConsensusStabilityScorer] = None,
-        esm_scorer: Optional[ESMStabilityScorer] = None,
-        nativeness_scorer: Optional["NativenessScorer"] = None,
-        w_humanness: float = 0.0,
-        w_stability: float = 0.80,
+        esm_scorer: Optional["ESMStabilityScorer"] = None,
+        w_stability: float = 0.70,
+        w_nativeness: float = 0.30,
         weights: Optional[dict[str, float]] = None,
         enabled_metrics: Optional[dict[str, bool]] = None,
     ) -> None:
-        self._humanness_scorer = humanness_scorer
         self._stability_scorer = stability_scorer if stability_scorer is not None else StabilityScorer()
+        self._nativeness_scorer = nativeness_scorer if nativeness_scorer is not None else NativenessScorer()
         self._hydrophobicity_scorer = hydrophobicity_scorer
-        self._hsc_scorer = hsc_scorer
         self._consensus_scorer = consensus_scorer
         self._esm_scorer = esm_scorer
-        self._nativeness_scorer = nativeness_scorer
 
-        self.w_humanness = w_humanness
         self.w_stability = w_stability
+        self.w_nativeness = w_nativeness
 
-        has_humanness = humanness_scorer is not None
-        has_nativeness = nativeness_scorer is not None
         self._weights: dict[str, float] = {
-            "humanness": 0.0 if not has_humanness else 0.15,
-            "stability": 0.80,
-            "surface_hydrophobicity": 0.20 if not has_humanness else 0.05,
-            "nativeness": 0.20 if has_nativeness else 0.0,
+            "stability": w_stability,
+            "surface_hydrophobicity": 0.0,
+            "nativeness": w_nativeness,
         }
         if weights is not None:
             self._weights.update(weights)
 
         self._enabled_metrics: dict[str, bool] = {
-            "humanness": has_humanness,
             "stability": True,
             "surface_hydrophobicity": False,
-            "nativeness": has_nativeness,
+            "nativeness": True,
         }
         if enabled_metrics is not None:
             self._enabled_metrics.update(enabled_metrics)
@@ -323,12 +313,6 @@ class MutationEngine:
         if self._hydrophobicity_scorer is None:
             self._hydrophobicity_scorer = SurfaceHydrophobicityScorer()
         return self._hydrophobicity_scorer
-
-    @property
-    def hsc_scorer(self) -> HumanStringContentScorer:
-        if self._hsc_scorer is None:
-            self._hsc_scorer = HumanStringContentScorer()
-        return self._hsc_scorer
 
     @property
     def consensus_scorer(self) -> ConsensusStabilityScorer:
@@ -366,12 +350,6 @@ class MutationEngine:
             "scoring_method": stab["scoring_method"],
         }
 
-        if self._humanness_scorer is not None:
-            hum = self._humanness_scorer.score(vhh)
-            scores["humanness"] = hum["composite_score"]
-        else:
-            scores["humanness"] = 0.0
-
         if "predicted_tm" in stab:
             scores["predicted_tm"] = stab["predicted_tm"]
 
@@ -381,13 +359,9 @@ class MutationEngine:
         else:
             scores["surface_hydrophobicity"] = 0.0
 
-        if self._enabled_metrics.get("nativeness", False) and self._nativeness_scorer is not None:
-            nat = self._nativeness_scorer.score(vhh)
-            scores["nativeness"] = nat["composite_score"]
-        else:
-            scores["nativeness"] = 0.0
+        nat = self._nativeness_scorer.score(vhh)
+        scores["nativeness"] = nat["composite_score"]
 
-        scores["orthogonal_humanness"] = self.hsc_scorer.score(vhh)["composite_score"]
         scores["orthogonal_stability"] = self.consensus_scorer.score(vhh)["composite_score"]
 
         return scores
@@ -455,11 +429,10 @@ class MutationEngine:
                     "reason": "Stability-driven scan",
                 }
 
-                if self._enabled_metrics.get("nativeness", False) and self._nativeness_scorer is not None:
-                    delta_nat = self._nativeness_scorer.predict_mutation_effect(
-                        vhh_sequence, pos_key, candidate_aa
-                    )
-                    candidate_dict["delta_nativeness"] = delta_nat
+                delta_nat = self._nativeness_scorer.predict_mutation_effect(
+                    vhh_sequence, pos_key, candidate_aa
+                )
+                candidate_dict["delta_nativeness"] = delta_nat
 
                 candidates.append(candidate_dict)
 
@@ -489,24 +462,14 @@ class MutationEngine:
         if forbidden_substitutions:
             forbidden_str = {str(k): v for k, v in forbidden_substitutions.items()}
 
-        # Choose candidate generation strategy
-        if self._humanness_scorer is not None:
-            suggestions = self._humanness_scorer.get_mutation_suggestions(
-                vhh_sequence,
-                off_limits=off_limits,
-                forbidden_substitutions=forbidden_substitutions,
-                excluded_target_aas=excluded_target_aas,
-                max_per_position=max_per_position,
-            )
-        else:
-            suggestions = self._generate_stability_candidates(
-                vhh_sequence,
-                off_limits=off_limits_str,
-                forbidden_substitutions=forbidden_str,
-                excluded_target_aas=excluded_target_aas,
-            )
+        # Candidate generation: stability-driven scan
+        suggestions = self._generate_stability_candidates(
+            vhh_sequence,
+            off_limits=off_limits_str,
+            forbidden_substitutions=forbidden_str,
+            excluded_target_aas=excluded_target_aas,
+        )
 
-        parent_seq = vhh_sequence.sequence
         rows: list[dict] = []
 
         for sug in suggestions:
@@ -515,18 +478,6 @@ class MutationEngine:
             new_aa: str = sug["suggested_aa"]
             original_aa: str = sug["original_aa"]
 
-            # For humanness-sourced candidates, check PTM liability
-            # (stability candidates are already filtered)
-            if self._humanness_scorer is not None:
-                mutant = VHHSequence.mutate(vhh_sequence, pos_key, new_aa)
-                seq_idx = vhh_sequence._pos_to_seq_idx.get(pos_key, int(pos) - 1)
-                if _introduces_ptm_liability(parent_seq, mutant.sequence, seq_idx):
-                    logger.debug(
-                        "Skipping %s%s%s: introduces PTM liability", original_aa, pos_key, new_aa
-                    )
-                    continue
-
-            delta_hum = sug.get("delta_humanness", 0.0)
             delta_stab = sug.get(
                 "delta_stability",
                 self._stability_scorer.predict_mutation_effect(vhh_sequence, pos_key, new_aa),
@@ -538,16 +489,14 @@ class MutationEngine:
                 if self._enabled_metrics.get("surface_hydrophobicity", False)
                 else 0.0
             )
-            delta_nat = (
+            delta_nat = sug.get(
+                "delta_nativeness",
                 self._nativeness_scorer.predict_mutation_effect(
                     vhh_sequence, pos_key, new_aa
-                )
-                if self._enabled_metrics.get("nativeness", False) and self._nativeness_scorer is not None
-                else 0.0
+                ),
             )
 
             raw_deltas: dict[str, float] = {
-                "humanness": delta_hum,
                 "stability": delta_stab,
                 "surface_hydrophobicity": delta_sh,
                 "nativeness": delta_nat,
@@ -560,7 +509,6 @@ class MutationEngine:
                     "imgt_pos": pos_key,
                     "original_aa": original_aa,
                     "suggested_aa": new_aa,
-                    "delta_humanness": delta_hum,
                     "delta_stability": delta_stab,
                     "delta_surface_hydrophobicity": delta_sh,
                     "delta_nativeness": delta_nat,
@@ -723,16 +671,14 @@ class MutationEngine:
             "variant_id": f"V{variant_counter:06d}",
             "mutations": ", ".join(mut_labels),
             "n_mutations": len(mutations),
-            "humanness_score": raw["humanness"],
             "stability_score": raw["stability"],
+            "nativeness_score": raw["nativeness"],
             "aggregation_score": raw["aggregation_score"],
             "charge_balance_score": raw["charge_balance_score"],
             "hydrophobic_core_score": raw["hydrophobic_core_score"],
             "disulfide_score": raw["disulfide_score"],
             "vhh_hallmark_score": raw["vhh_hallmark_score"],
             "surface_hydrophobicity_score": raw["surface_hydrophobicity"],
-            "nativeness_score": raw["nativeness"],
-            "orthogonal_humanness_score": raw["orthogonal_humanness"],
             "orthogonal_stability_score": raw["orthogonal_stability"],
             "combined_score": combined,
             "aa_sequence": mutant_seq,
@@ -1276,16 +1222,14 @@ class MutationEngine:
                 "variant_id",
                 "mutations",
                 "n_mutations",
-                "humanness_score",
                 "stability_score",
+                "nativeness_score",
                 "aggregation_score",
                 "charge_balance_score",
                 "hydrophobic_core_score",
                 "disulfide_score",
                 "vhh_hallmark_score",
                 "surface_hydrophobicity_score",
-                "nativeness_score",
-                "orthogonal_humanness_score",
                 "orthogonal_stability_score",
                 "combined_score",
                 "aa_sequence",
