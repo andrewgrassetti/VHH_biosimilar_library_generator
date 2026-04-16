@@ -578,3 +578,143 @@ class TestAnchorIdentification:
         if len(anchors) >= 2:
             for i in range(len(anchors) - 1):
                 assert anchors[i].confidence >= anchors[i + 1].confidence
+
+
+# ---------------------------------------------------------------------------
+# Nativeness integration tests
+# ---------------------------------------------------------------------------
+
+
+class _MockNativenessScorer:
+    """Deterministic mock that follows the NativenessScorer interface."""
+
+    def score(self, vhh: VHHSequence) -> dict:
+        # Return a deterministic score based on sequence length hash
+        raw = (len(vhh.sequence) % 20) / 20.0
+        return {"composite_score": 0.5 + raw * 0.4}
+
+    def predict_mutation_effect(
+        self, vhh: VHHSequence, position: int | str, new_aa: str
+    ) -> float:
+        # Return a small deterministic delta
+        return 0.02 if new_aa in "AGILV" else -0.01
+
+
+class TestNativenessIntegration:
+    """Tests for nativeness integration in MutationEngine."""
+
+    def test_no_nativeness_scorer_backward_compat(self) -> None:
+        """Without nativeness_scorer, nativeness is disabled with weight 0.0."""
+        engine = MutationEngine(stability_scorer=StabilityScorer())
+        assert engine._enabled_metrics["nativeness"] is False
+        assert engine._weights["nativeness"] == 0.0
+
+    def test_nativeness_scorer_enabled(self) -> None:
+        """With a nativeness scorer, nativeness is enabled with weight > 0."""
+        engine = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=_MockNativenessScorer(),
+        )
+        assert engine._enabled_metrics["nativeness"] is True
+        assert engine._weights["nativeness"] > 0.0
+
+    def test_nativeness_in_metric_names(self) -> None:
+        assert "nativeness" in MutationEngine.METRIC_NAMES
+
+    def test_rank_single_mutations_has_delta_nativeness(self) -> None:
+        """rank_single_mutations output includes delta_nativeness column."""
+        mock_scorer = _MockNativenessScorer()
+        engine = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=mock_scorer,
+        )
+        vhh = VHHSequence(SAMPLE_VHH)
+        ranked = engine.rank_single_mutations(vhh)
+        assert "delta_nativeness" in ranked.columns
+        if not ranked.empty:
+            # With mock scorer enabled, some delta values should be non-zero
+            assert ranked["delta_nativeness"].abs().sum() > 0
+
+    def test_rank_single_mutations_delta_nativeness_zero_when_disabled(self) -> None:
+        """Without nativeness scorer, delta_nativeness should be 0."""
+        engine = MutationEngine(stability_scorer=StabilityScorer())
+        vhh = VHHSequence(SAMPLE_VHH)
+        ranked = engine.rank_single_mutations(vhh)
+        assert "delta_nativeness" in ranked.columns
+        if not ranked.empty:
+            assert all(ranked["delta_nativeness"] == 0.0)
+
+    def test_build_variant_row_has_nativeness_score(self) -> None:
+        """_build_variant_row output includes nativeness_score."""
+        mock_scorer = _MockNativenessScorer()
+        engine = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=mock_scorer,
+        )
+        vhh = VHHSequence(SAMPLE_VHH)
+        ranked = engine.rank_single_mutations(vhh)
+        if ranked.empty:
+            pytest.skip("No mutations ranked")
+        lib = engine.generate_library(vhh, ranked.head(3), n_mutations=1)
+        if not lib.empty:
+            assert "nativeness_score" in lib.columns
+
+    def test_combined_score_changes_with_nativeness(self) -> None:
+        """Combined score differs when nativeness is enabled vs disabled."""
+        vhh = VHHSequence(SAMPLE_VHH)
+
+        engine_without = MutationEngine(stability_scorer=StabilityScorer())
+        ranked_without = engine_without.rank_single_mutations(vhh)
+
+        mock_scorer = _MockNativenessScorer()
+        engine_with = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=mock_scorer,
+        )
+        ranked_with = engine_with.rank_single_mutations(vhh)
+
+        if ranked_without.empty or ranked_with.empty:
+            pytest.skip("No mutations to compare")
+
+        # The combined scores should differ because nativeness contributes
+        scores_without = set(ranked_without["combined_score"].round(6))
+        scores_with = set(ranked_with["combined_score"].round(6))
+        assert scores_without != scores_with
+
+    def test_stability_only_identical_without_nativeness(self) -> None:
+        """Stability-only mode works identically when nativeness is not provided."""
+        vhh = VHHSequence(SAMPLE_VHH)
+
+        engine1 = MutationEngine(stability_scorer=StabilityScorer())
+        ranked1 = engine1.rank_single_mutations(vhh)
+
+        engine2 = MutationEngine(stability_scorer=StabilityScorer())
+        ranked2 = engine2.rank_single_mutations(vhh)
+
+        if ranked1.empty or ranked2.empty:
+            pytest.skip("No mutations ranked")
+
+        # Same engine config → identical results
+        assert list(ranked1["combined_score"]) == list(ranked2["combined_score"])
+
+    def test_empty_library_df_has_nativeness_score(self) -> None:
+        """_empty_library_df includes nativeness_score column."""
+        df = MutationEngine._empty_library_df()
+        assert "nativeness_score" in df.columns
+
+    def test_generate_library_with_nativeness(self) -> None:
+        """Library generation works with nativeness scorer enabled."""
+        mock_scorer = _MockNativenessScorer()
+        engine = MutationEngine(
+            stability_scorer=StabilityScorer(),
+            nativeness_scorer=mock_scorer,
+        )
+        vhh = VHHSequence(SAMPLE_VHH)
+        ranked = engine.rank_single_mutations(vhh)
+        if ranked.empty:
+            pytest.skip("No mutations ranked")
+        lib = engine.generate_library(vhh, ranked.head(3), n_mutations=1)
+        assert isinstance(lib, pd.DataFrame)
+        if not lib.empty:
+            assert "nativeness_score" in lib.columns
+            assert "stability_score" in lib.columns
