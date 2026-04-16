@@ -1,8 +1,6 @@
 """Main Streamlit application for VHH Biosimilar Library Generator."""
 
 
-import logging
-
 import matplotlib
 import pandas as pd
 import streamlit as st
@@ -171,7 +169,7 @@ def sidebar():
             disabled=not enable_stability, key="w_stability",
         )
         enable_hydrophobicity = st.checkbox(
-            "Enable surface hydrophobicity", value=True, key="enable_hydrophobicity",
+            "Enable surface hydrophobicity", value=False, key="enable_hydrophobicity",
         )
         st.slider(
             "Surface hydrophobicity weight", 0.0, 1.0, 0.00, 0.05,

@@ -61,7 +61,8 @@ class TestIntegration:
         vhh: VHHSequence,
     ) -> None:
         mutant = VHHSequence.mutate(vhh, 1, "A")
-        consensus.score(vhh)["composite_score"]
-        con_mutant = consensus.score(mutant)["composite_score"]
-        # Just verify it runs
-        assert isinstance(con_mutant, float)
+        parent_score = consensus.score(vhh)["composite_score"]
+        mutant_score = consensus.score(mutant)["composite_score"]
+        # Both should be valid floats (score may or may not change)
+        assert isinstance(parent_score, float)
+        assert isinstance(mutant_score, float)
