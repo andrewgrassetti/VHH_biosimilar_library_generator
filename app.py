@@ -1,6 +1,8 @@
 """Main Streamlit application for VHH Biosimilar Library Generator."""
 
 
+import logging
+
 import matplotlib
 import pandas as pd
 import streamlit as st
@@ -76,7 +78,7 @@ def load_scorers():
     except ImportError:
         pass
     except Exception:
-        pass
+        logging.getLogger(__name__).debug("AbNatiV scorer init failed", exc_info=True)
     return h, s, hydro, hsc, cons, esm_scorer, nativeness_scorer
 
 

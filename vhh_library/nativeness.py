@@ -111,7 +111,7 @@ class NativenessScorer:
                 is_VHH=True,
                 output_dir=tmpdir,
                 output_id="nativeness",
-                run_parall_al=1,
+                run_parall_al=1,  # AbNatiV's API parameter name (upstream typo)
             )
 
         # The scores DataFrame has a 'score' column (or similar).

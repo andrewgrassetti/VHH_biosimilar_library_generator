@@ -586,11 +586,15 @@ class TestAnchorIdentification:
 
 
 class _MockNativenessScorer:
-    """Deterministic mock that follows the NativenessScorer interface."""
+    """Deterministic mock that follows the NativenessScorer interface.
+
+    Uses sequence length modulo to produce repeatable scores in [0.5, 0.9].
+    """
+
+    _SCORE_MODULO = 20
 
     def score(self, vhh: VHHSequence) -> dict:
-        # Return a deterministic score based on sequence length hash
-        raw = (len(vhh.sequence) % 20) / 20.0
+        raw = (len(vhh.sequence) % self._SCORE_MODULO) / self._SCORE_MODULO
         return {"composite_score": 0.5 + raw * 0.4}
 
     def predict_mutation_effect(
